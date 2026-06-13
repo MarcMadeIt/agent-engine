@@ -7,16 +7,17 @@
 # Usage (on your laptop):
 #   docker compose up -d
 # then set in your local .env:
-#   SUPABASE_DB_URL=postgresql://agent_engine:devpassword@127.0.0.1:5432/agent_engine
+#   SUPABASE_DB_URL=postgresql://agent:devpassword@127.0.0.1:5432/agent_engine
 #
-# Leave SUPABASE_DB_URL empty instead if you just want the in-memory saver.
+# Same username (`agent`) as the VPS's native Postgres, so only the password
+# differs per environment. Leave SUPABASE_DB_URL empty for the in-memory saver.
 services:
   postgres:
     image: postgres:16
     container_name: agent-engine-pg
     restart: unless-stopped
     environment:
-      POSTGRES_USER: agent_engine
+      POSTGRES_USER: agent
       POSTGRES_PASSWORD: devpassword
       POSTGRES_DB: agent_engine
     ports:
@@ -24,7 +25,7 @@ services:
     volumes:
       - agent-engine-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agent_engine -d agent_engine"]
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_engine"]
       interval: 5s
       timeout: 5s
       retries: 5
