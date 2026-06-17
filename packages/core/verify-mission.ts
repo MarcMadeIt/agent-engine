@@ -7,7 +7,12 @@
  * (a crashed in_progress item is requeued).
  * Run: pnpm --filter @arzonic/agent-core exec tsx verify-mission.ts
  */
-import { runMission, type MissionDeps, type Replanner } from "./src/controller.js";
+import {
+  runMission,
+  type Integrator,
+  type MissionDeps,
+  type Replanner,
+} from "./src/controller.js";
 import type {
   BacklogItem,
   BacklogStore,
@@ -279,6 +284,101 @@ const retryReplanner: Replanner = {
   ok(!ran.includes("danger"), "the high-risk item NEVER ran (parked before execution)");
   ok(ran.includes("safe"), "the low-risk item still ran — the loop didn't block");
   ok(out.status === "blocked", "mission ends blocked with the parked item awaiting a decision");
+}
+
+// ── 11–13. integration (Trin 5): done requires green AFTER merge ──
+
+// A runner that ran write-capably: it reports the item's worktree + branch.
+const worktreeRunner: WorkRunner = {
+  async run(it) {
+    return {
+      runId: it.id,
+      status: "accepted",
+      draft: `built ${it.id}`,
+      verdict: null,
+      tokensUsed: 100,
+      worktree: `/wt/${it.id}`,
+      branch: `mission/m/item/${it.id}`,
+    };
+  },
+};
+
+function fakeIntegrator(opts: { conflict?: boolean } = {}) {
+  const calls = { merge: [] as string[], rollback: 0, cleanup: [] as string[] };
+  const integrator: Integrator = {
+    async merge({ branch }) {
+      calls.merge.push(branch);
+      return { merged: !opts.conflict, output: opts.conflict ? "CONFLICT" : "ok" };
+    },
+    async rollback() {
+      calls.rollback++;
+    },
+    async cleanup(id) {
+      calls.cleanup.push(id);
+    },
+  };
+  return { integrator, calls };
+}
+
+// 11. happy path: worktree-green item merges + re-verifies green ⇒ done, cleaned up.
+{
+  const store = makeStore({ ...baseMission }, [item("a", 1)]);
+  const { integrator, calls } = fakeIntegrator();
+  const out = await runMission(
+    { backlog: store, verifier: passingVerifier, runner: worktreeRunner, integrator },
+    "m1",
+  );
+  const a = (await store.listItems("m1")).find((i) => i.id === "a")!;
+  ok(out.status === "done" && a.status === "done", "merge + green re-verify ⇒ item done");
+  ok(calls.merge[0] === "mission/m/item/a", "the item's branch was merged into the mission branch");
+  ok(calls.cleanup.includes("a") && calls.rollback === 0, "successful integration cleans up, never rolls back");
+}
+
+// 12. merge conflict ⇒ parked for a human (not done), nothing cleaned up.
+{
+  const store = makeStore({ ...baseMission }, [item("a", 1)]);
+  const { integrator, calls } = fakeIntegrator({ conflict: true });
+  const out = await runMission(
+    { backlog: store, verifier: passingVerifier, runner: worktreeRunner, integrator },
+    "m1",
+  );
+  const a = (await store.listItems("m1")).find((i) => i.id === "a")!;
+  ok(a.status === "blocked_needs_human", "a merge conflict parks the item for a human");
+  ok(out.itemsDone === 0 && out.status === "blocked", "a conflicting item is NOT counted done");
+  ok(calls.cleanup.length === 0 && calls.rollback === 0, "no cleanup/rollback when the merge itself failed");
+  ok(a.verification?.passed === false, "the parked item records the integration failure");
+}
+
+// 13. green in isolation but RED after merge ⇒ rollback + park (mission branch stays green).
+{
+  // Passes when checks run in a worktree (cwd set), fails on the post-merge
+  // re-verify in the main repo (cwd undefined): two greens summing to red.
+  const splitVerifier: Verifier = {
+    async run(checks, cwd): Promise<VerifierReport> {
+      const passed = cwd !== undefined;
+      return { passed, results: checks.map((c) => ({ passed, check: c, output: passed ? "" : "integration red" })) };
+    },
+  };
+  const store = makeStore({ ...baseMission }, [item("a", 1)]);
+  const { integrator, calls } = fakeIntegrator();
+  const out = await runMission(
+    { backlog: store, verifier: splitVerifier, runner: worktreeRunner, integrator, governors: { thrashLimit: 5 } },
+    "m1",
+  );
+  const a = (await store.listItems("m1")).find((i) => i.id === "a")!;
+  ok(calls.merge.length === 1 && calls.rollback === 1, "a red post-merge build is rolled back");
+  ok(calls.cleanup.length === 0, "a rolled-back item's worktree is NOT cleaned up");
+  ok(a.status === "blocked_needs_human" && out.itemsDone === 0, "integration-breaking item is parked, not done");
+}
+
+// 14. backward-compat: no integrator ⇒ worktree-green is enough for done.
+{
+  const store = makeStore({ ...baseMission }, [item("a", 1)]);
+  const out = await runMission(
+    { backlog: store, verifier: passingVerifier, runner: worktreeRunner },
+    "m1",
+  );
+  ok(out.status === "done" && out.itemsDone === 1, "without an integrator, a verified item still closes (planning mode)");
 }
 
 console.log("\nrunMission controller loop verified ✓");

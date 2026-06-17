@@ -1,15 +1,13 @@
-import { spawn } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import type {
   CreateWorktreeOptions,
   RemoveWorktreeOptions,
   Worktree,
   WorktreeManager,
 } from "@arzonic/agent-core";
-
-const GIT_TIMEOUT_MS = 60_000;
+import { git, runGit } from "./git.js";
 
 export interface WorktreeManagerOptions {
   /**
@@ -18,50 +16,6 @@ export interface WorktreeManagerOptions {
    * tree so git doesn't see a nested checkout.
    */
   worktreesRoot?: string;
-}
-
-interface GitResult {
-  code: number;
-  output: string;
-}
-
-/** Spawn git with literal args and NO shell, cwd = repo. Never throws on exit code. */
-function runGit(cwd: string, args: string[]): Promise<GitResult> {
-  return new Promise((resolve) => {
-    const child = spawn("git", args, {
-      cwd,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-    });
-    let output = "";
-    let killed = false;
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGKILL");
-    }, GIT_TIMEOUT_MS);
-    const collect = (d: Buffer) => {
-      output += d.toString();
-    };
-    child.stdout.on("data", collect);
-    child.stderr.on("data", collect);
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      resolve({ code: 1, output: `${output}\n${e.message}` });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: killed ? 124 : (code ?? 1), output });
-    });
-  });
-}
-
-async function git(cwd: string, args: string[]): Promise<string> {
-  const { code, output } = await runGit(cwd, args);
-  if (code !== 0) {
-    throw new Error(`git ${args.join(" ")} failed (exit ${code}):\n${output.trim()}`);
-  }
-  return output;
 }
 
 /** A backlog item id becomes a directory segment — reject anything unsafe. */
@@ -86,6 +40,28 @@ export function createWorktreeManager(
   const repoPath = realpathSync(resolve(repoPathArg));
   const worktreesRoot = resolve(options.worktreesRoot ?? join(repoPath, ".agent-worktrees"));
   const pathFor = (id: string) => join(worktreesRoot, id);
+
+  /**
+   * Keep the worktree root out of `git status` (best-effort): when it lives
+   * inside the repo, add it to `.git/info/exclude` (repo-local, never committed).
+   * Skipped when the root is outside the repo or `.git` isn't a real directory.
+   */
+  async function ensureExcluded(): Promise<void> {
+    const rel = relative(repoPath, worktreesRoot);
+    if (rel === "" || rel.startsWith("..") || rel.includes(sep + "..")) return;
+    try {
+      const gitDir = join(repoPath, ".git");
+      if (!statSync(gitDir).isDirectory()) return;
+      const excludePath = join(gitDir, "info", "exclude");
+      const pattern = `/${rel.split(sep).join("/")}/`;
+      const current = existsSync(excludePath) ? await readFile(excludePath, "utf8") : "";
+      if (!current.split("\n").includes(pattern)) {
+        await appendFile(excludePath, `${current.endsWith("\n") || current === "" ? "" : "\n"}${pattern}\n`);
+      }
+    } catch {
+      // best-effort only — cosmetic git-status hygiene
+    }
+  }
 
   async function list(): Promise<Worktree[]> {
     const out = await git(repoPath, ["worktree", "list", "--porcelain"]);
@@ -134,6 +110,7 @@ export function createWorktreeManager(
       if (existing) return existing;
 
       await mkdir(worktreesRoot, { recursive: true });
+      await ensureExcluded();
       // Drop stale registry entries, then clear any leftover dir from a crash so
       // `git worktree add` doesn't fail on an existing path.
       await git(repoPath, ["worktree", "prune"]);

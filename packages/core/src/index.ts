@@ -69,6 +69,8 @@ export {
   type MissionDeps,
   type MissionOutcome,
   type MissionGovernors,
+  type Integrator,
+  type MergeResult,
   type Replanner,
   type ReplanInput,
   type ReplanDecision,

@@ -33,6 +33,8 @@ export interface WorkResult {
    * than in the main repo. Undefined for the read-only planning runner.
    */
   worktree?: string;
+  /** The branch the item was authored on, for the integration/merge step (Trin 5). */
+  branch?: string;
 }
 
 export interface WorkRunner {
@@ -157,7 +159,7 @@ export function createWorktreeWorkRunner(
       if (prepare) await prepare(wt);
       const inner = createGraphWorkRunner(buildGraph(wt), graphOptions);
       const res = await inner.run(item, signal);
-      return { ...res, worktree: wt.path };
+      return { ...res, worktree: wt.path, branch: wt.branch };
     },
   };
 }

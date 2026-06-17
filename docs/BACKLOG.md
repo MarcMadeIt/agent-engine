@@ -48,6 +48,23 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 
 ## ✅ Senest leveret
 
+### 2026-06-18 — M2 Trin 5: Integration + verificér-efter-merge (mission-branchen altid grøn)
+- [x] `Integrator`-seam i core ([packages/core/src/controller.ts](../packages/core/src/controller.ts)):
+      `merge`/`rollback`/`cleanup` — pure git, injiceret som de øvrige sømme. Controlleren orkestrerer
+      merge → re-verify (via Verifier, ét sandhedssted) → rollback/cleanup.
+- [x] **Done kræver grøn EFTER merge:** grønt worktree → commit på item-branch → merge til mission-branch →
+      `Verifier.run(checks)` på mission-branchen. Grøn ⇒ done + cleanup; merge-konflikt ⇒ park;
+      rød post-merge ⇒ **rollback** + park. To uafhængigt grønne items kan summe til rød — det fanges nu.
+- [x] `createGitIntegrator` + `ensureGitBranch` i shared ([packages/shared/src/integrator.ts](../packages/shared/src/integrator.ts)):
+      committer implementerens ucommittede worktree-ændringer på item-branchen (ellers var merge no-op),
+      `merge --no-ff` m. abort på konflikt, `reset --hard` rollback, worktree-cleanup. Git-helpere udtrukket til delt [git.ts](../packages/shared/src/git.ts).
+- [x] Branch-topologi: mission-branch `mission/<id>/integration`, items `mission/<id>/item/<x>` — begge under
+      `mission/<id>/` så ingen git ref D/F-konflikt. Worktree-roden ekskluderes fra `git status` via `.git/info/exclude`.
+- [x] **Mission-worker wired:** ensure mission-branch → item-branches baseres på den → integrator pr. mission.
+- [x] Bevist: git-integrator ([verify-integrator.ts](../packages/shared/verify-integrator.ts), 13 checks, rigtig git:
+      merge/konflikt-abort/rollback/cleanup) + controller-orkestrering ([verify-mission.ts](../packages/core/verify-mission.ts),
+      udvidet: done-efter-merge, konflikt→park, rød-post-merge→rollback+park, bagudkompat uden integrator). `turbo build` grøn (6/6).
+
 ### 2026-06-18 — M2 Trin 4: WorkRunner i worktree (motoren forfatter nu kode)
 - [x] `createWorktreeWorkRunner` i core ([packages/core/src/runner.ts](../packages/core/src/runner.ts)):
       pr. item → provisioner worktree (Trin 2) → valgfri `prepare` (deps) → kører en per-worktree graf
@@ -332,9 +349,10 @@ Build-order (shippet + bevist pr. trin, som M1):
       provisioner worktree pr. item, kører implementeren rodfæstet dér, og `Verifier.run(checks, cwd)`
       checker den forfattede kode i worktree'et. Deps via `installWorktreeDeps` (pnpm, delt store).
       Mission-worker wired. (`runner.ts` + `graph.ts` + `verifier.ts`)
-- [ ] **5. Integration + verificér-efter-merge** — verify i worktree → merge mission-branch
-      → **re-verify på mission-branch** (to grønne items kan summe til rød main). Konflikt →
-      park `blocked_needs_human`.
+- [x] **5. Integration + verificér-efter-merge** — `Integrator`-seam (`merge`/`rollback`/`cleanup`),
+      git-impl `createGitIntegrator`. Controller: grønt worktree → merge til mission-branch →
+      **re-verify på mission-branch** → done **kun** hvis grøn efter merge; konflikt el. rød post-merge
+      (rulles tilbage) → park `blocked_needs_human`. Mission-branchen forbliver altid grøn. (`controller.ts` + `integrator.ts`)
 - [ ] **6. Parallelisme** *(egen epic, sidst, konservativt)* — N actionable items samtidigt,
       hver i egen worktree. Lead tildeler **ikke-overlappende fil-scopes**, ellers merge
       **sekventielt** (rebase næste på forrige). Start med seriel-i-worktrees (1–5).

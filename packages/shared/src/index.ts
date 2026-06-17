@@ -12,6 +12,11 @@ export {
   type WorktreeManagerOptions,
 } from "./worktree.js";
 export {
+  createGitIntegrator,
+  ensureGitBranch,
+  type GitIntegratorOptions,
+} from "./integrator.js";
+export {
   MemoryService,
   type MemoryServiceOptions,
   type Project,

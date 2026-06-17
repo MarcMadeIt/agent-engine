@@ -71,6 +71,34 @@ export interface Notifier {
   notify(event: MissionEvent): Promise<void> | void;
 }
 
+// ── Integration seam (Trin 5: merge a green item into the mission branch) ──
+
+export interface MergeResult {
+  /** false on a merge conflict (the impl aborts the merge, leaving the branch clean). */
+  merged: boolean;
+  /** git output / conflict detail for the journal. */
+  output: string;
+}
+
+/**
+ * Integrates a worktree-green item into the mission's integration branch. The
+ * controller orchestrates merge → re-verify (via the Verifier) → rollback/cleanup
+ * so the Verifier stays the single truth source. Pure git ops only; injected like
+ * every other seam. Undefined ⇒ no integration (the read-only planning runner).
+ */
+export interface Integrator {
+  /**
+   * Merge the item's branch into the integration branch. The impl first commits
+   * the implementer's (uncommitted) changes in `worktree` onto the item branch,
+   * then merges that branch — so authored code actually flows into the mission branch.
+   */
+  merge(input: { itemId: string; branch: string; worktree?: string }): Promise<MergeResult>;
+  /** Undo the last merge after a red post-merge build, restoring the branch. */
+  rollback(): Promise<void>;
+  /** Tear down the item's worktree after a successful integration. */
+  cleanup(itemId: string): Promise<void>;
+}
+
 // ── Clock seam — no Date.now() in core; the runtime injects time ──
 
 export interface Clock {
@@ -104,6 +132,8 @@ export interface MissionDeps {
   replanner?: Replanner;
   notifier?: Notifier;
   clock?: Clock;
+  /** Merges green items into the mission branch + re-verifies (Trin 5). Optional. */
+  integrator?: Integrator;
   governors?: MissionGovernors;
   /** Checks the Verifier runs per item. Default ["typecheck", "test"]. */
   checks?: string[];
@@ -239,10 +269,48 @@ export async function runMission(
     const report = await verifier.run(checks, result.worktree);
     const decision = await replanner.replan({ mission, item, result, verification: report });
 
-    // Thrash guard: an item that keeps failing is parked for a human, not
-    // retried forever. Parking it (not the mission) lets the loop move on.
     let effectiveStatus = decision.itemStatus;
-    if (effectiveStatus !== "done") {
+    let verification = summarizeVerification(checks, report);
+
+    // Integration (Trin 5): a worktree-green item must ALSO merge into the
+    // mission branch and pass re-verification there before it counts as done —
+    // two independently-green items can still sum to a red integration. A merge
+    // conflict, or a red post-merge build (rolled back), parks the item for a
+    // human; the mission branch stays green.
+    if (effectiveStatus === "done" && deps.integrator && result.branch) {
+      const merge = await deps.integrator.merge({
+        itemId: item.id,
+        branch: result.branch,
+        worktree: result.worktree,
+      });
+      if (!merge.merged) {
+        effectiveStatus = "blocked_needs_human";
+        verification = {
+          passed: false,
+          check: "integration",
+          output: `Merge conflict integrating into the mission branch — needs a human.\n\n${merge.output}`,
+        };
+      } else {
+        const postMerge = await verifier.run(checks);
+        if (!postMerge.passed) {
+          await deps.integrator.rollback();
+          effectiveStatus = "blocked_needs_human";
+          verification = {
+            passed: false,
+            check: `integration:${checks.join(",")}`,
+            output: `Post-merge build is red — merge rolled back, mission branch kept green.\n\n${summarizeVerification(checks, postMerge).output}`,
+          };
+        } else {
+          await deps.integrator.cleanup(item.id);
+          verification = summarizeVerification(checks, postMerge);
+        }
+      }
+    }
+
+    // Thrash guard: an item that keeps FAILING (not one parked above) is parked
+    // for a human, not retried forever. Parking it (not the mission) lets the
+    // loop move on.
+    if (effectiveStatus !== "done" && effectiveStatus !== "blocked_needs_human") {
       const fails = (attempts.get(item.id) ?? 0) + 1;
       attempts.set(item.id, fails);
       if (fails >= thrashLimit) effectiveStatus = "blocked_needs_human";
@@ -251,7 +319,7 @@ export async function runMission(
     const finished =
       (await backlog.updateItem(item.id, {
         status: effectiveStatus,
-        verification: summarizeVerification(checks, report),
+        verification,
       })) ?? item;
     for (const f of decision.followUps ?? []) {
       await backlog.createItem({ ...f, missionId });

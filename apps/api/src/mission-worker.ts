@@ -8,9 +8,11 @@ import {
 } from "@arzonic/agent-core";
 import {
   createConsoleNotifier,
+  createGitIntegrator,
   createVerifier,
   createWritableRepoTools,
   createWorktreeManager,
+  ensureGitBranch,
   getModel,
   installWorktreeDeps,
 } from "@arzonic/agent-shared";
@@ -84,10 +86,24 @@ async function main(): Promise<void> {
       if (stopping) break;
       // Write-capable execution: one isolated worktree per item, the implementer
       // graph authoring real code in it (rooted via WritableRepoTools), deps
-      // installed before checks. The Verifier runs in the item's worktree.
+      // installed before checks. The Verifier runs in the item's worktree, then
+      // green items merge into the mission branch and are re-verified there.
+      // Both branches live under mission/<id>/ so neither is a ref-name prefix
+      // of the other (git forbids a ref that is also a directory of refs).
+      const missionBranch = `mission/${mission.id}/integration`;
+      try {
+        await ensureGitBranch(mission.repoPath, missionBranch);
+      } catch (err) {
+        console.error(
+          `[mission-worker] could not prepare branch ${missionBranch}:`,
+          err instanceof Error ? err.message : err,
+        );
+        continue;
+      }
       const worktrees = createWorktreeManager(mission.repoPath);
       const runner = createWorktreeWorkRunner({
         worktrees,
+        baseRef: missionBranch,
         branch: (item) => `mission/${mission.id}/item/${item.id}`,
         prepare: async (wt) => {
           const install = await installWorktreeDeps(wt.path);
@@ -108,12 +124,14 @@ async function main(): Promise<void> {
       const verifier = createVerifier(mission.repoPath, {
         allowedChecks: env.REPO_ALLOWED_CHECKS,
       });
+      const integrator = createGitIntegrator(mission.repoPath, { missionBranch, worktrees });
       try {
         const outcome = await runMission(
           {
             backlog,
             verifier,
             runner,
+            integrator,
             replanner,
             notifier,
             clock: { now: () => Date.now() },
