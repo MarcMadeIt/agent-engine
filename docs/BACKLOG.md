@@ -48,6 +48,15 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 
 ## ✅ Senest leveret
 
+### 2026-06-17 — Projekt-først UX: Opgave|Mission-toggle, missioner under projektet
+- [x] Segmented toggle (**Opgave | Mission**) i projekt-composeren ([apps/web/app/page.tsx](../apps/web/app/page.tsx)) —
+      ét sted at vælge kørsels-mode, begge inden for projektets kontekst (repo + hukommelse).
+- [x] `MissionComposer` ([apps/web/app/components/MissionComposer.tsx](../apps/web/app/components/MissionComposer.tsx)):
+      arver projektets repo (kræver et repo — verifikationskilden), mål + acceptkriterier + start-backlog + budget.
+- [x] Projektet viser nu både **Seneste opgaver** og **Missioner** ([ProjectMissions](../apps/web/app/components/ProjectMissions.tsx)).
+- [x] Fjernet det separate "Missioner"-ø-link i railen → rydder "tre ting"-forvirringen; projekt er den ene container.
+      `turbo build` grøn (6/6).
+
 ### 2026-06-17 — Missioner Trin 8b: Mission-dashboard (M1 i mål 🎉)
 - [x] `/missions`: liste + opret-mission (projekt, repo, mål, acceptkriterier, start-backlog, budget).
 - [x] `/missions/:id` dashboard ([apps/web/app/missions/](../apps/web/app/missions/)): live via SSE-snapshots
