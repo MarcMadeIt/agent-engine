@@ -347,7 +347,7 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
       <div className="border-t border-line px-4 py-3">
         <button
           onClick={newProject}
-          className="btn btn-primary w-full gap-1.5 font-bold normal-case"
+          className="btn w-full gap-1.5 border-line bg-elev font-semibold text-fg/90 normal-case hover:border-dim hover:bg-elev/70"
         >
           <LuFolderPlus className="h-4 w-4" /> Nyt projekt
         </button>
