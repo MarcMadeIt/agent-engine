@@ -48,6 +48,18 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 
 ## ✅ Senest leveret
 
+### 2026-06-17 — M2 Trin 2: Worktree-manager (isoleret arbejde pr. item)
+- [x] Ny `WorktreeManager`-interface i core ([packages/core/src/worktree.ts](../packages/core/src/worktree.ts)):
+      `create`/`remove`/`list`/`prune` — pure søm (ingen git/fs/`Date.now()`), injiceres som BacklogStore/Verifier.
+      Branch-navne sendes **ind** af kalderen (deterministisk fra mission/item-ids) → core forbliver klok-fri + resume-safe.
+- [x] `createWorktreeManager(repoPath)` i shared ([packages/shared/src/worktree.ts](../packages/shared/src/worktree.ts)):
+      `git worktree`-drevet, én worktree pr. item på egen branch (`<root>/.agent-worktrees/<id>`).
+      **Idempotent create** (resume genbruger eksisterende worktree m. arbejde intakt), force-remove (+ valgfri branch-sletning),
+      og `prune` der rydder forældreløse entries efter crash. Git spawnes uden shell; usikre ids afvises.
+- [x] Symlink-robust: realpather repo-roden (macOS `/var`→`/private/var`) så `list()` matcher git's resolvede stier.
+- [x] Bevist ([packages/shared/verify-worktree.ts](../packages/shared/verify-worktree.ts), 15 checks mod et rigtigt temp-repo):
+      isolation mellem worktrees + main, idempotent resume bevarer arbejde, prune efter crash, branch-sletning. `turbo build` grøn (6/6).
+
 ### 2026-06-17 — M2 Trin 1: Write-laget i RepoTools (springet mod kørende kode)
 - [x] Ny `WritableRepoTools extends RepoTools` i core ([packages/core/src/tools.ts](../packages/core/src/tools.ts)):
       `writeFile` / `applyEdit` / `deleteFile` / `runCommand` — **separat interface**, ikke optional
@@ -281,7 +293,7 @@ Build-order (shippet + bevist pr. trin, som M1):
 
 - [x] **1. Write-laget i RepoTools** — `writeFile` / `applyEdit` / `deleteFile` /
       `runCommand`, path-confined til `REPO_ALLOWED_ROOTS`. (`tools.ts` + `repoTools.ts`)
-- [ ] **2. Worktree-manager** (injiceret søm i `shared`, som BacklogStore/Verifier) —
+- [x] **2. Worktree-manager** (injiceret søm i `shared`, som BacklogStore/Verifier) —
       worktree pr. item på en mission-branch, oprydning + `git worktree prune` ved crash.
 - [ ] **3. Implementer-node med write-tools** — wrap write-tools som LangChain `tool()`
       + `bindTools` (samme mønster som [analyst.ts](../packages/core/src/nodes/analyst.ts)).

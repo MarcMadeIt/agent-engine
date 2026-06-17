@@ -8,6 +8,10 @@ export {
 } from "./repoTools.js";
 export { discoverRepos, type RepoInfo } from "./repos.js";
 export {
+  createWorktreeManager,
+  type WorktreeManagerOptions,
+} from "./worktree.js";
+export {
   MemoryService,
   type MemoryServiceOptions,
   type Project,

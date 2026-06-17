@@ -14,6 +14,12 @@ export {
 } from "./graph.js";
 export type { RepoTools, WritableRepoTools } from "./tools.js";
 export type {
+  Worktree,
+  WorktreeManager,
+  CreateWorktreeOptions,
+  RemoveWorktreeOptions,
+} from "./worktree.js";
+export type {
   ProjectMemory,
   MemoryKind,
   MemoryHit,
