@@ -32,6 +32,15 @@ Missions-køreplanen står under **Epics**.
 
 ## ✅ Senest leveret
 
+### 2026-06-17 — Missioner Trin 2: Verifier (pass/fail = sandheden for "done")
+- [x] `Verifier`-interface + `VerifierReport` i core ([packages/core/src/verifier.ts](../packages/core/src/verifier.ts)).
+- [x] `createVerifier(repoPath)` i shared ([packages/shared/src/verifier.ts](../packages/shared/src/verifier.ts)):
+      kører allowlistede checks, `passed` udledt af rigtig exit-kode (ikke LLM).
+- [x] Delt check-runner ([packages/shared/src/checks.ts](../packages/shared/src/checks.ts)) som
+      både `RepoTools.runCheck` og Verifier bruger → pass/fail kan ikke divergere.
+- [x] Bevist ([packages/shared/verify-verifier.ts](../packages/shared/verify-verifier.ts)):
+      exit 0 ⇒ passed, exit 1 ⇒ failed, ukendt/ingen check ⇒ aldrig stille pass. `turbo build` grøn.
+
 ### 2026-06-17 — Missioner Trin 1: schema + BacklogStore (fundament for Nordstjernen)
 - [x] `BacklogStore`-interface + `Mission`/`BacklogItem`-typer (zod) i core
       ([packages/core/src/mission.ts](../packages/core/src/mission.ts)) — framework-fri,

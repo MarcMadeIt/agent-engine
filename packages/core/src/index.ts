@@ -43,6 +43,7 @@ export {
   type CreateBacklogItemInput,
   type BacklogItemPatch,
 } from "./mission.js";
+export type { Verifier, VerifierReport } from "./verifier.js";
 export {
   defaultRubric,
   renderRubric,

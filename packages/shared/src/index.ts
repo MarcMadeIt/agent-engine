@@ -29,3 +29,10 @@ export {
   type Risk,
   type Verification,
 } from "./backlog.js";
+export { createVerifier, type VerifierOptions } from "./verifier.js";
+export {
+  runCheckProcess,
+  truncateTail,
+  DEFAULT_ALLOWED_CHECKS,
+  type CheckRun,
+} from "./checks.js";
