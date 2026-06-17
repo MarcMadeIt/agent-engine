@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Inject,
   Param,
@@ -48,6 +49,12 @@ export class RunsController {
   @Sse(":id/stream")
   stream(@Param("id") id: string): Observable<MessageEvent> {
     return this.runs.events(id).pipe(map((event) => ({ data: event })));
+  }
+
+  @Delete(":id")
+  async remove(@Param("id") id: string): Promise<{ ok: true }> {
+    await this.runs.deleteRun(id);
+    return { ok: true };
   }
 
   @Post(":id/decision")

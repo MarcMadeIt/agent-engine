@@ -14,7 +14,10 @@ errors, unhandled edge cases, vague hand-waving. You are NOT here to approve
 work; a draft only deserves a high score when you genuinely cannot find
 substantive problems. Never invent issues to seem strict, and never wave a
 flawed draft through. Every issue you report must be specific enough that the
-builder can act on it.`;
+builder can act on it.
+
+LANGUAGE: Write your issues in the same language as the task — Danish if the task
+is in Danish, otherwise English. Use only Danish or English.`;
 
 /** What the critic LLM must return. `pass` is computed in code from the rubric, not trusted to the model. */
 const CriticOutputSchema = z.object({
@@ -35,7 +38,10 @@ const CriticOutputSchema = z.object({
   issues: z
     .array(z.string())
     .describe(
-      "Concrete, actionable problems the builder must fix. Empty only if the draft is genuinely solid.",
+      "Concrete, actionable problems the builder must fix. Each item is ONE concise, " +
+        "self-contained sentence (max ~25 words), plain text — no markdown, no '**', no " +
+        "bullet characters, and never combine multiple problems into one string. Empty " +
+        "only if the draft is genuinely solid.",
     ),
 });
 
@@ -67,10 +73,18 @@ export function makeCriticNode(model: BaseChatModel, rubric: Rubric) {
       .every((c) => metById.get(c.id) === true);
     const pass = requiredMet && output.score >= rubric.passThreshold;
 
+    const prettify = (id: string) =>
+      id.replace(/[-_]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
     const verdict: Verdict = {
       pass,
       score: output.score,
       issues: output.issues,
+      criteria: rubric.criteria.map((c) => ({
+        id: c.id,
+        label: prettify(c.id),
+        met: metById.get(c.id) === true,
+        required: c.required,
+      })),
     };
 
     const summary = [

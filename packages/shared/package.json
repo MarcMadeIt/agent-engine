@@ -16,15 +16,19 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@arzonic/agent-core": "workspace:*",
     "@langchain/anthropic": "1.4.1",
     "@langchain/core": "1.1.49",
     "@langchain/mistralai": "1.1.0",
     "@supabase/supabase-js": "2.108.1",
     "dotenv": "17.4.2",
+    "pg": "8.21.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "25.9.3",
+    "@types/pg": "8.20.0",
+    "tsx": "4.22.4",
     "typescript": "5.9.3"
   }
 }

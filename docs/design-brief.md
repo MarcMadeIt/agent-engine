@@ -1,146 +1,284 @@
-# Design Brief - Agent Engine
+# Design Brief — Agent Engine
 
-Hand-off spec for Claude Code. Build exactly what is described, follow the non-negotiables, and stop at the v1 acceptance criteria. Anything under "Out of scope (v1)" must NOT be built yet.
+**Single source of truth.** This is the living spec: what the engine *is today*
+(as-built, §3–4) and where it's *going* (the autonomous-missions north star, §5+).
+It supersedes the earlier phased briefs (v1 / Phase 2 / Phase 3 / Phase 4), now
+folded in here. The checkbox-level roadmap lives in [BACKLOG.md](BACKLOG.md).
+
+**Last updated:** 2026-06-16
+
+---
 
 ## 1. Purpose
 
-Agent Engine is an internal multi-agent engine for Arzonic. A small team of role-based agents collaborate and challenge each other to produce higher-quality output, with a human approval gate before anything is accepted.
+Agent Engine is Arzonic's internal multi-agent engine. Role-based agents collaborate
+and challenge each other to produce higher-quality output than a single model pass.
+It runs as a CLI, an HTTP service (`apps/api`), and a web dashboard (`apps/web`);
+`packages/core` is portable and meant to be lifted into Ranky/Bravy.
 
-v1 ships the smallest useful version: a builder ↔ critic loop that refines a single task until a rubric passes or a round limit is hit, runnable from a CLI.
+---
 
-The engine `core` must be portable - it will later be lifted into the Ranky product to power a customer-facing assistant. Design for that from day one.
+## 2. Non-negotiables
 
-## 2. Non-negotiables (constraints)
+- **TypeScript everywhere**; **LangGraph.js** is the orchestration engine.
+- **`packages/core` is pure TS — framework-free** (no Nest/HTTP/transport). The reuse
+  contract with Ranky: importable into Next.js untouched. New capabilities (memory,
+  repo tools, the mission controller, tester tools) enter core as **injected
+  interfaces** — exactly like `ProjectMemory` and `RepoTools` already are.
+- **Nest only ever lives in `apps/api`.**
+- **Provable termination**: bounded loops (`MAX_ROUNDS`, token/cost budget, per-run
+  timeout) for tasks; governors (budget/deadline/iterations/no-progress) for missions.
+- **Human-in-the-loop** before `accepted` for tasks; for missions the human never
+  blocks the loop (park-risk + async approval, §5.5).
+- **Env-driven**; no secrets in code. Deployable as plain Node processes under PM2.
 
-- TypeScript everywhere.
-- LangGraph.js (`@langchain/langgraph`) is the orchestration engine.
-- `packages/core` is pure TS, framework-free - no Nest, no HTTP, no transport. This is the reuse contract with Ranky. If it can't be imported into a Next.js app untouched, it's wrong.
-- Nest is NOT used in v1. It only ever lives in `apps/api` later.
-- v1 runs as a CLI, no server.
-- State + checkpoints persist in Supabase (EU) - but start with the built-in in-memory saver and swap to Supabase last (see build order).
-- Hard guardrails: max rounds, token/cost budget, timeout. The loop must be provably terminating.
-- Human-in-the-loop: a gate before final "accepted" status.
-- Deployable as a plain Node process under PM2 on a VPS.
-- No secrets in code - everything via env.
+---
 
-## 3. Repo structure (Turborepo, pnpm)
+## 3. Architecture as-built
+
+### 3.1 The four graphs (`packages/core/src/graph.ts`)
+
+One `GraphState`, shared nodes; the runtime picks one per request, or a router picks.
+
+- **`createAgentGraph` — single (v1):**
+  `builder → critic → [pass | round≥MAX → humanGate ; else → builder]`;
+  `humanGate → [approve → END(accepted) | revise → builder | reject → END]`.
+- **`createTeamGraph` — the team:** `architect → worker×N → lead → critic → … →
+  humanGate`. Architect plans 3–6 zod-validated steps; a worker runs per step; the
+  lead synthesizes one draft and revises on critic/human notes.
+- **`createProjectGraph` — persistent project team (adaptive):**
+  `retrieveContext → router → [team | single] → critic → … → humanGate →
+  persistMemory`. Pulls brief + top-k pgvector memory into `context`; router picks
+  the lightest topology; persistMemory stores the accepted result.
+- **`createRepoAnalysisGraph` — grounded, read-only:** `analyst (tool-using) →
+  critic → [pass | round≥MAX → done]`. No gate; injected read-only `RepoTools`,
+  sandboxed by the runtime.
+
+### 3.2 State (`packages/core/src/state.ts`)
+
+`task, messages, draft, round, verdict, status, tokensUsed` plus `humanNotes`,
+`plan[]`, `currentStep`, `stepResults[]`, `projectId`, `context`,
+`topology: 'single' | 'team'`. `AgentMessage.agent` ∈ {builder, critic, human,
+system, analyst, architect, lead, worker}.
+
+### 3.3 Rubric / Definition of Done (`packages/core/src/rubric.ts`)
+
+A config object (`defaultRubric`): criteria (`id, description, required`) +
+`passThreshold`. **Pass = all required criteria met AND score ≥ threshold**, enforced
+in code (`criticNode`). Hosts can pass a custom rubric per run.
+
+### 3.4 Memory (core interface + `@arzonic/agent-shared` impl)
+
+Core defines memory as a pure interface (`retrieve`, `store`); the pgvector-backed
+`MemoryService` lives in shared and is injected. Owns `projects`, `tasks`,
+`project_memory` (kinds: brief/artifact/decision/note). Needs `SUPABASE_DB_URL`
+(Postgres + pgvector) + `MISTRAL_API_KEY`; without them, project/memory features are
+disabled and the other graphs still work.
+
+### 3.5 API (`apps/api`, NestJS, bearer-guarded)
+
+`runs` (`POST/GET /runs`, `GET /runs/:id`, `SSE /runs/:id/stream`, `DELETE`,
+`POST /runs/:id/decision`); `projects` (`POST/GET`, `GET/PATCH/DELETE /:id`,
+`POST/GET /:id/tasks`); `repos` `GET /repos`; `rubric` `GET /rubric`; `tasks`
+`GET /tasks` (global feed).
+
+### 3.6 Web (`apps/web`, Next.js)
+
+Project-first dashboard proxying the API via server-side `/api/*` handlers (keeps
+`AGENT_API_KEY` server-side). Project-scoped composer (memory indicator, team roster,
+Definition of Done, repo-per-project); sidebar with projects + global recent-tasks
+feed; run view streams the debate with a human-gate inspector.
+
+### 3.7 Clients & deploy
+
+`@arzonic/agent-client` — zero-dep typed HTTP client + source of truth for wire
+types. API deploys to the VPS via PM2; CLI runs ad hoc; persistence/resume via the
+Postgres checkpointer (run id = thread id).
+
+---
+
+## 4. Guardrails / termination (tasks, provable today)
+
+Worker loop runs exactly `plan.length` times; builder↔critic / lead↔critic capped by
+`MAX_ROUNDS`; `RUN_TOKEN_BUDGET` routes any node to `fail`; `RUN_TIMEOUT_MS` aborts
+via AbortController; the human gate is the only unbounded wait (explicit interrupt).
+
+---
+
+## 5. North star — Autonomous Missions
+
+The direction: **from** bounded, human-gated single tasks **to** long-running
+**autonomous missions** that keep working — overnight, at a steady tempo — planning
+their own backlog, executing, **verifying against a real repo**, self-critiquing,
+re-planning, and looping until the goal is met or a governor stops them. The four
+graphs stay the "do one unit of work well" engine; a mission is an **outer controller
+loop** that keeps feeding them work. It does **not** replace tasks — it's a second
+mode beside them.
+
+### 5.1 Two modes
+
+| | **Task** (existing) | **Mission** (new) |
+|---|---|---|
+| Duration | ≤ ~15 min | hours / overnight |
+| Loop | `MAX_ROUNDS` then stop | until done / budget / time / no-progress |
+| Human | blocking gate | **never blocks** — risky items parked, async digest |
+| Truth of "done" | critic rubric | **build/test/lint pass on a real repo** |
+
+### 5.2 Mission model (new Postgres tables, beside project memory)
+
+- **`missions`**: `id, projectId, goal, acceptanceCriteria[], repoPath, status
+  (running | paused | blocked | done | failed | stopped), budget, spentTokens,
+  deadline, createdAt`.
+- **`backlog_items`**: `id, missionId, title, detail, status (todo | in_progress |
+  done | blocked_needs_human | failed), priority, dependsOn[], risk (low | high),
+  runId, verification (check result), createdAt, updatedAt`.
+
+Workspace = `repoPath` (validated against `REPO_ALLOWED_ROOTS`, reusing the sandbox).
+Journal = ordered backlog history + each item's run transcript (already checkpointed).
+
+### 5.3 The controller loop (pure core, injected I/O)
+
+A pure async function in core — `runMission(deps, missionId)`:
 
 ```
-agent-engine/
-  packages/
-    core/            # graph, nodes (agents), state schema, tools, rubric/DoD. Pure TS.
-    shared/          # env loading, supabase client, llm client factory, shared types
-  apps/
-    cli/             # v1 entrypoint: run the graph on one task (tsx)
-  package.json
-  pnpm-workspace.yaml
-  turbo.json
-  tsconfig.base.json
+while (status === running):
+    if (budget/time/iteration ceiling hit)   → stop(reason)
+    if (no actionable items)                  → done | blocked | stop
+    item   = backlog.nextActionable(missionId)        # lead prioritises, respects dependsOn
+    mark item in_progress
+    result = runWorkItem(item)                        # existing project/team graph, checkpointed by item.id
+    verify = verifier.run(repoPath, checks)           # run_check: test/lint/typecheck/build — truth source
+    review = replan(goal, item, result, verify, backlog)   # lead: pass/fail + new/updated items
+    apply review to backlog (done / add follow-ups / mark blocked)
+    if (no-progress or thrash detected)       → stop(reason)
+    checkpoint                                        # survives restart
 ```
 
-Package scopes: `@arzonic/agent-core`, `@arzonic/agent-shared`, `@arzonic/agent-cli`. (Scoped under `@arzonic` so packages are reusable across Arzonic repos.)
+Injected deps (interfaces in core; concrete impls in api/shared): **`BacklogStore`**
+(missions + items), **`Verifier`** (wraps `run_check`; pass/fail is the truth, not the
+LLM), **`WorkRunner`** (runs one item through a compiled graph → deliverable + runId),
+**`Notifier`** (async events: parked item, digest, done), **`Clock`/`Budget`**
+(deadline + ceilings — no `Date.now()` in core; pass time in).
 
-Do not create empty packages "for later". Only `core`, `shared`, `cli` in v1.
+### 5.4 Roles
 
-## 4. Tech stack
+- **Orchestrator/Lead** — owns the backlog: prioritises, sets work in motion, re-plans from results.
+- **Team** (architect → workers → lead) — executes each item via the existing team graph.
+- **Tester/Verifier** — runs the real checks; its result, not the LLM, decides "done".
 
-- pnpm workspaces + Turborepo
-- TypeScript (strict)
-- `@langchain/langgraph` (graph + in-memory `MemorySaver`)
-- `@langchain/langgraph-checkpoint-postgres` (Supabase/Postgres saver - added last)
-- `@langchain/core`
-- LLM provider: configurable. Default EU-friendly option `@langchain/mistralai` (`ChatMistralAI`); also support `@langchain/anthropic` (`ChatAnthropic`). Selected via `LLM_PROVIDER` env.
-- `zod` for state + structured-output schemas
-- `@supabase/supabase-js`
-- `tsx` to run the CLI
-- LangSmith tracing - optional, enabled by env only
+### 5.5 Human policy — park-risk, run the rest (never block)
 
-Verify current package versions before installing; pin them in package.json.
+- **Risk classification** per item (planner + static high-risk rules): deploys, data
+  deletion, payments, secrets, irreversible ops → `high`.
+- **Low-risk + verified** → auto-applied, item closed.
+- **High-risk** → `blocked_needs_human`; `Notifier` posts it; the loop moves on.
+- **Async approval** clears parked items (API/dashboard), making them actionable again.
+- **Morning digest**: done / parked / spend / next steps.
 
-## 5. Core design (`packages/core`)
+### 5.6 Safety governors (replace the v1 termination proof for missions)
 
-### State (zod schema)
+Hard ceilings (`MISSION_TOKEN_BUDGET`, `MISSION_DEADLINE` wall-clock,
+`MISSION_MAX_ITERATIONS`); **no-progress detector** (N iterations with no newly-
+verified item → stop+flag); **thrash guard** (an item failing the same check
+repeatedly → park the item, not the mission); **kill switch**
+(`POST /missions/:id/stop`, halts at next checkpoint); live budget meter in the UI.
 
-- `task: string` - the input request
-- `messages: AgentMessage[]` - running transcript (agent, role, content)
-- `draft: string` - current builder output
-- `round: number`
-- `verdict: { pass: boolean; score: number; issues: string[] } | null`
-- `status: 'running' | 'awaiting_human' | 'accepted' | 'failed'`
+### 5.7 Mission API + worker (`apps/api`)
 
-### Nodes
+Behind the bearer guard: `POST /missions` `{ projectId, goal, repoPath,
+acceptanceCriteria?, budget?, deadline? }`; `GET /missions` / `GET /missions/:id`;
+`SSE /missions/:id/stream`; `POST /missions/:id/stop`;
+`POST /missions/:id/items/:itemId/decision` (async approve/reject parked item). A
+**PM2 mission-worker** process drives `runMission` for active missions (separate from
+the API, sharing the Postgres checkpointer/backlog) — add it to `ecosystem.config.cjs`.
 
-- `builderNode` - produces/revises `draft` from `task` + latest critic `issues`.
-- `criticNode` - evaluates `draft` against a rubric / Definition of Done and returns a structured `verdict` (zod-validated). The critic must be prompted to find concrete problems, not to approve by default.
+### 5.8 Worked example — "Build a webshop with full integration" (overnight)
 
-### Rubric / Definition of Done
+Intake → backlog (catalog, cart, checkout, payments, auth, admin, seed data, tests,
+deploy) → execute items via the team graph in the repo → verifier runs build/tests →
+replan adds follow-ups (payment-failure handling, error/empty states, a11y,
+validation) and parks high-risk items (which payment provider, deploy) → loop under
+budget → by morning: a built+verified artifact, a backlog history, parked decisions,
+and a digest.
 
-A small, explicit, configurable checklist the critic scores against (e.g. correctness, completeness, matches task, no obvious security/edge-case gaps). Pass = all required criteria met AND `score >= threshold`. This is 80% of output quality - make it a first-class, easily-editable config object, not buried in a prompt string.
+---
 
-### Graph
+## 6. Build order (incremental — each step shippable)
+
+Tracked as checkboxes under **Epics → Autonome missioner** in [BACKLOG.md](BACKLOG.md):
+
+1. **Schema**: `missions` + `backlog_items`; `BacklogStore` interface (core) + Postgres impl.
+2. **Verifier**: wrap `run_check` as `Verifier`; "done" = checks pass (prove it fails on failing tests).
+3. **WorkRunner**: run one item through the project/team graph, checkpointed by item id.
+4. **Controller loop** (`runMission`): single iteration → full loop, with checkpoint + resume.
+5. **Replan agent** (lead): goal + result + verification → update backlog (close / follow-ups / block / risk).
+6. **Governors**: budget/deadline/iterations/no-progress/thrash + kill switch.
+7. **Human policy**: risk parking + async decision endpoint + `Notifier` (dashboard/log first).
+8. **Mission API + PM2 worker**, then the **mission dashboard** (backlog board, live activity, budget burn, parked items, digest).
+
+---
+
+## 7. Out of scope (for now) & open questions
+
+**Out of scope:** multiple concurrent missions on the same repo (serialize); cross-
+mission learning / global skill memory; the engine self-modifying its own code; real
+Slack/email transport (stub `Notifier` first).
+
+**Still open:** mission as a mode on a project vs its own entity (leaning: own
+`missions` row linked to a project); default budgets/deadline for an overnight run;
+parallelism within a mission (serial first, worktrees later); how aggressively the
+replan agent self-challenges vs. sticks to the goal.
+
+---
+
+## 8. Acceptance criteria
+
+**Shipped (tasks):** `turbo build` green across all packages incl. `apps/web`; all
+four graphs run behind the bearer-guarded API and persist/resume via the Postgres
+checkpointer; team decomposes→executes→synthesizes; router picks single/team; project
+tasks retrieve-then-persist memory; repo runs stay read-only within
+`REPO_ALLOWED_ROOTS`; `packages/core` has zero framework/transport deps.
+
+**Directional (missions):** a mission decomposes a goal into a backlog and works items
+without a blocking gate; an item closes only when real checks pass (a failing build
+keeps it open and feeds the next replan); high-risk items are parked and the mission
+continues; governors provably stop it (budget/deadline/iterations/no-progress), each
+with a recorded reason; a mission survives a restart and resumes; `POST /missions/:id/stop`
+halts at the next checkpoint; core stays pure (all mission I/O injected); a digest
+summarises done/parked/spend/next.
+
+---
+
+## 9. Origin / history
+
+v1 was a single **builder↔critic** CLI loop (rubric pass or `MAX_ROUNDS`, human gate),
+core-pure from day one for Ranky reuse. **Phase 2** added the NestJS HTTP service +
+typed client. **Phase 3** added the multi-agent team, the adaptive project graph,
+pgvector project memory, repo tools, and the Next.js dashboard. **Phase 4** (§5) is
+the autonomous-missions direction. The original phased briefs are merged into this doc.
+
+---
+
+## 10. Env vars
 
 ```
-START → builder → critic → [conditional edge]
-   conditional edge:
-     pass === true            → humanGate
-     round >= MAX_ROUNDS      → humanGate (status: needs review)
-     else                     → builder   (increment round)
-humanGate → END   (interrupt for human approve/reject; on approve status=accepted)
-```
-
-### Guardrails
-
-- `MAX_ROUNDS` (default 3) - hard stop.
-- Token/cost budget per run - abort + mark failed if exceeded.
-- Per-run timeout.
-
-### Checkpointer
-
-- v1: `MemorySaver`.
-- Then swap to a Supabase/Postgres-backed saver so runs persist and resume.
-
-## 6. Runtime (`apps/cli`)
-
-- Command: `pnpm agent "<task>"`
-- Behaviour: starts one thread, streams each node step to stdout, prints the final draft + verdict + full transcript. On `awaiting_human`, prompt in the terminal to approve/reject, then resume.
-- All config (API keys, Supabase, limits, provider) from env via `@arzonic/agent-shared`.
-
-## 7. Out of scope (v1) - note only, do NOT build
-
-- `apps/api` (NestJS): HTTP, Slack/Mattermost webhooks, BullMQ workers, dashboard.
-- Extra agents: architect, lead/orchestrator.
-- Promoting `core` into the Ranky repo.
-
-## 8. Acceptance criteria (definition of done for v1)
-
-1. `turbo build` succeeds across the workspace.
-2. `pnpm agent "build X"` runs the builder ↔ critic loop and terminates by either rubric pass or `MAX_ROUNDS`.
-3. Output: final draft, structured verdict, and full transcript printed.
-4. `packages/core` has zero framework/transport/HTTP dependencies.
-5. Human gate works: run pauses, human approves/rejects, status updates.
-6. Checkpointer persists a run; an interrupted run can be resumed.
-7. All config env-driven; no hardcoded secrets.
-
-## 9. Env vars
-
-```
-LLM_PROVIDER=mistral            # mistral | anthropic
-MISTRAL_API_KEY=
-ANTHROPIC_API_KEY=
-SUPABASE_URL=
-SUPABASE_SERVICE_KEY=
+LLM_PROVIDER=mistral|anthropic        # + MISTRAL_API_KEY / ANTHROPIC_API_KEY
+LLM_MODEL=                            # optional explicit model id
+SUPABASE_DB_URL=                      # Postgres + pgvector → checkpointer + memory + missions
+SUPABASE_URL= / SUPABASE_SERVICE_KEY=
 MAX_ROUNDS=3
-RUN_TOKEN_BUDGET=               # optional cap
-LANGSMITH_TRACING=false
-LANGSMITH_API_KEY=              # only if tracing
+RUN_TOKEN_BUDGET=                     # per-run cap → run fails if exceeded
+RUN_TIMEOUT_MS=300000                 # per-run hard timeout
+REPO_ALLOWED_ROOTS=                   # absolute roots repo/mission work is confined to
+REPO_ALLOWED_CHECKS=test,lint,typecheck,build
+AGENT_API_KEY=                        # ≥16 chars; required by every API route
+API_PORT=8787
+API_CORS_ORIGINS=                     # exact Ranky/Bravy origins
+LANGSMITH_TRACING=false               # + LANGSMITH_API_KEY if enabled
+# missions:
+MISSION_TOKEN_BUDGET=                 # hard token/cost ceiling per mission
+MISSION_DEADLINE_HHMM=07:00           # optional wall-clock stop
+MISSION_MAX_ITERATIONS=               # backstop iteration cap
+MISSION_NOPROGRESS_LIMIT=3            # consecutive no-progress iterations before stopping
+MISSION_HIGH_RISK_PATTERNS=           # extra patterns forcing risk=high (deploy, drop, delete …)
 ```
-
-## 10. Build order for Claude Code
-
-1. Init pnpm + Turborepo; create `tsconfig.base.json`, `turbo.json`, `pnpm-workspace.yaml`. Add `packages/core`, `packages/shared`, `apps/cli`.
-2. `shared`: env loader (zod-validated), supabase client, `getModel()` factory selecting provider from `LLM_PROVIDER`.
-3. `core`: state schema → builder/critic nodes → rubric config → graph with conditional edge + human gate → guardrails. Use `MemorySaver` first.
-4. `cli`: entrypoint invoking the graph, streaming steps, handling the human gate.
-5. Verify acceptance criteria 1–5 with `MemorySaver`.
-6. Swap checkpointer to the Supabase/Postgres saver; verify criteria 6–7.
-7. Write a short README: how to run, env setup, how to edit the rubric, and where the architect/lead agents will slot in later.

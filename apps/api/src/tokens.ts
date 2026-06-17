@@ -2,3 +2,4 @@
 export const ENV = "ENV" as const;
 export const MODEL = "MODEL" as const;
 export const CHECKPOINTER = "CHECKPOINTER" as const;
+export const MEMORY = "MEMORY" as const;

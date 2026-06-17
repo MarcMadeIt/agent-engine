@@ -15,6 +15,17 @@ const ApiEnvSchema = z.object({
         .map((o) => o.trim())
         .filter(Boolean),
     ),
+  // Absolute base dirs a repo-analysis run may point at. Empty = allow any path
+  // (dev only — set this in production, e.g. /opt).
+  REPO_ALLOWED_ROOTS: z
+    .string()
+    .default("")
+    .transform((s) =>
+      s
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean),
+    ),
 });
 
 export type ApiEnv = Env & z.infer<typeof ApiEnvSchema>;

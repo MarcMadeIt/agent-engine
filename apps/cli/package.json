@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "agent": "tsx src/index.ts"
+    "agent": "tsx src/index.ts",
+    "analyze": "tsx src/analyze.ts"
   },
   "dependencies": {
     "@arzonic/agent-core": "workspace:*",

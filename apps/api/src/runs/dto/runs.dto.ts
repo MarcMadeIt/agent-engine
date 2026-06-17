@@ -4,6 +4,11 @@ import { z } from "zod";
 export const StartRunSchema = z.object({
   task: z.string().min(1, "task must not be empty").max(20_000),
   rubricId: z.string().min(1).optional(),
+  // "single" (builder↔critic, default) or "team" (architect → workers → lead).
+  mode: z.enum(["single", "team"]).optional(),
+  // When set, the run is a grounded repo analysis (read-only tools) instead of
+  // a pure builder↔critic text loop.
+  repoPath: z.string().min(1).optional(),
   options: z
     .object({
       maxRounds: z.number().int().min(1).max(20).optional(),
@@ -13,7 +18,7 @@ export const StartRunSchema = z.object({
 export type StartRunDto = z.infer<typeof StartRunSchema>;
 
 export const DecisionSchema = z.object({
-  decision: z.enum(["approve", "reject"]),
+  decision: z.enum(["approve", "reject", "revise"]),
   notes: z.string().max(10_000).optional(),
 });
 export type DecisionDto = z.infer<typeof DecisionSchema>;

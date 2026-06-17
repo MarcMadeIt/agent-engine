@@ -4,12 +4,24 @@ import { getModel } from "@arzonic/agent-shared";
 import { ApiKeyGuard } from "./auth/api-key.guard.js";
 import { createCheckpointer } from "./checkpointer.js";
 import { loadApiEnv, type ApiEnv } from "./env.js";
+import { createMemory } from "./memory.provider.js";
+import { ProjectsController } from "./projects/projects.controller.js";
+import { ProjectsService } from "./projects/projects.service.js";
+import { ReposController } from "./runs/repos.controller.js";
+import { RubricController } from "./runs/rubric.controller.js";
 import { RunsController } from "./runs/runs.controller.js";
+import { TasksController } from "./runs/tasks.controller.js";
 import { RunsService } from "./runs/runs.service.js";
-import { CHECKPOINTER, ENV, MODEL } from "./tokens.js";
+import { CHECKPOINTER, ENV, MEMORY, MODEL } from "./tokens.js";
 
 @Module({
-  controllers: [RunsController],
+  controllers: [
+    RunsController,
+    ReposController,
+    ProjectsController,
+    RubricController,
+    TasksController,
+  ],
   providers: [
     { provide: ENV, useFactory: loadApiEnv },
     {
@@ -22,7 +34,13 @@ import { CHECKPOINTER, ENV, MODEL } from "./tokens.js";
       useFactory: (env: ApiEnv) => createCheckpointer(env),
       inject: [ENV],
     },
+    {
+      provide: MEMORY,
+      useFactory: (env: ApiEnv) => createMemory(env),
+      inject: [ENV],
+    },
     RunsService,
+    ProjectsService,
     { provide: APP_GUARD, useClass: ApiKeyGuard },
   ],
 })

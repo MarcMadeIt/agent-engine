@@ -2,16 +2,37 @@ import { Annotation } from "@langchain/langgraph";
 import { z } from "zod";
 
 export const AgentMessageSchema = z.object({
-  agent: z.enum(["builder", "critic", "human", "system"]),
+  agent: z.enum([
+    "builder",
+    "critic",
+    "human",
+    "system",
+    "analyst",
+    "architect",
+    "lead",
+    "worker",
+  ]),
   role: z.enum(["assistant", "user", "system"]),
   content: z.string(),
 });
 export type AgentMessage = z.infer<typeof AgentMessageSchema>;
 
+export const StepResultSchema = z.object({ step: z.string(), output: z.string() });
+export type StepResult = z.infer<typeof StepResultSchema>;
+
+export const CriterionResultSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  met: z.boolean(),
+  required: z.boolean(),
+});
+export type CriterionResult = z.infer<typeof CriterionResultSchema>;
+
 export const VerdictSchema = z.object({
   pass: z.boolean(),
   score: z.number().min(0).max(100),
   issues: z.array(z.string()),
+  criteria: z.array(CriterionResultSchema).optional(),
 });
 export type Verdict = z.infer<typeof VerdictSchema>;
 
@@ -61,6 +82,39 @@ export const GraphState = Annotation.Root({
   tokensUsed: Annotation<number>({
     reducer: (_a, b) => b,
     default: () => 0,
+  }),
+  // Free-text guidance a human injects at the gate to steer the next round.
+  humanNotes: Annotation<string>({
+    reducer: (_a, b) => b,
+    default: () => "",
+  }),
+  // ── team mode (architect → workers → lead) ──
+  plan: Annotation<string[]>({
+    reducer: (_a, b) => b,
+    default: () => [],
+  }),
+  currentStep: Annotation<number>({
+    reducer: (_a, b) => b,
+    default: () => 0,
+  }),
+  stepResults: Annotation<StepResult[]>({
+    reducer: (a, b) => a.concat(b),
+    default: () => [],
+  }),
+  // ── project mode (memory + adaptive routing) ──
+  projectId: Annotation<string>({
+    reducer: (_a, b) => b,
+    default: () => "",
+  }),
+  // Retrieved project context (brief + top-k memory) injected into every agent.
+  context: Annotation<string>({
+    reducer: (_a, b) => b,
+    default: () => "",
+  }),
+  // Topology the router chose for this task.
+  topology: Annotation<"single" | "team">({
+    reducer: (_a, b) => b,
+    default: () => "single",
   }),
 });
 

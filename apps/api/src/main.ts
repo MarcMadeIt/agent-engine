@@ -20,7 +20,7 @@ async function bootstrap(): Promise<void> {
   await app.listen(env.API_PORT, "0.0.0.0");
   console.log(
     `[agent-api] v${APP_VERSION} listening on :${env.API_PORT} | provider: ${env.LLM_PROVIDER} | ` +
-      `checkpointer: ${env.SUPABASE_DB_URL ? "supabase/postgres" : "memory (dev only)"}`,
+      `checkpointer: ${env.SUPABASE_DB_URL ? "postgres" : "memory (dev only)"}`,
   );
 }
 

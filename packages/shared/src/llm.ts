@@ -17,12 +17,14 @@ export function getModel(env: Env): BaseChatModel {
         apiKey: env.ANTHROPIC_API_KEY,
         model,
         temperature: 0.2,
+        maxRetries: 2,
       });
     case "mistral":
       return new ChatMistralAI({
         apiKey: env.MISTRAL_API_KEY,
         model,
         temperature: 0.2,
+        maxRetries: 2,
       });
   }
 }

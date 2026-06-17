@@ -9,7 +9,13 @@ export interface HumanGatePayload {
   note: string;
 }
 
-export type HumanDecision = "approve" | "reject";
+export type HumanDecision = "approve" | "reject" | "revise";
+
+/** What the runtime resumes the interrupt with. A bare string is still accepted (CLI). */
+export interface HumanResume {
+  decision: HumanDecision;
+  notes?: string;
+}
 
 /**
  * Runs just before the interrupt so the persisted checkpoint carries
@@ -45,20 +51,42 @@ export async function humanGateNode(
       : "Max rounds reached — needs review.",
   };
 
-  const decision = interrupt(payload) as HumanDecision;
+  const resume = interrupt(payload) as HumanResume | HumanDecision;
+  const decision: HumanDecision = typeof resume === "string" ? resume : resume.decision;
+  const notes = typeof resume === "string" ? "" : (resume.notes ?? "").trim();
 
   if (decision === "approve") {
     return {
       status: "accepted",
+      messages: [{ agent: "human", role: "user", content: "Approved final draft." }],
+    };
+  }
+
+  if (decision === "revise") {
+    // Loop back to the builder with the human's notes as guidance.
+    return {
+      status: "running",
+      humanNotes: notes,
       messages: [
-        { agent: "human", role: "user", content: "Approved final draft." },
+        {
+          agent: "human",
+          role: "user",
+          content: notes
+            ? `Requested a revision with notes: ${notes}`
+            : "Requested another revision.",
+        },
       ],
     };
   }
+
   return {
     status: "failed",
     messages: [
-      { agent: "human", role: "user", content: "Rejected final draft." },
+      {
+        agent: "human",
+        role: "user",
+        content: notes ? `Rejected final draft. Notes: ${notes}` : "Rejected final draft.",
+      },
     ],
   };
 }

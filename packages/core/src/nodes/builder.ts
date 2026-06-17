@@ -6,11 +6,16 @@ const SYSTEM_PROMPT = `You are the Builder in a builder/critic loop. You produce
 draft for the given task. When critic feedback is provided, you revise the
 previous draft to resolve every issue — do not ignore feedback, do not start
 over unless an issue demands it. Output ONLY the draft itself, no preamble,
-no meta-commentary.`;
+no meta-commentary.
+
+LANGUAGE: Respond in the same language as the task. If the task is written in
+Danish, write entirely in Danish; otherwise write in English. Use only Danish
+or English — never any other language.`;
 
 export function makeBuilderNode(model: BaseChatModel) {
   return async (state: GraphStateType): Promise<Partial<GraphStateType>> => {
     const parts = [`# Task\n${state.task}`];
+    if (state.context) parts.push(`# Project context\n${state.context}`);
 
     if (state.draft) {
       parts.push(`# Previous draft\n${state.draft}`);
@@ -20,6 +25,11 @@ export function makeBuilderNode(model: BaseChatModel) {
         `# Critic issues to resolve\n${state.verdict.issues
           .map((i) => `- ${i}`)
           .join("\n")}`,
+      );
+    }
+    if (state.humanNotes) {
+      parts.push(
+        `# Human guidance (highest priority — incorporate this)\n${state.humanNotes}`,
       );
     }
 

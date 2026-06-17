@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { relative, resolve, sep } from "node:path";
 import {
+  BadRequestException,
   ConflictException,
   Inject,
   Injectable,
@@ -9,11 +11,20 @@ import {
 import { ReplaySubject, type Observable } from "rxjs";
 import {
   createAgentGraph,
+  createProjectGraph,
+  createRepoAnalysisGraph,
+  createTeamGraph,
   defaultRubric,
   type AgentGraph,
   type GraphStateType,
   type Rubric,
 } from "@arzonic/agent-core";
+import {
+  createRepoTools,
+  discoverRepos,
+  type MemoryService,
+  type RepoInfo,
+} from "@arzonic/agent-shared";
 import type {
   ApiRunStatus,
   DecisionResponse,
@@ -26,10 +37,15 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import { Command } from "@langchain/langgraph";
 import type { CheckpointerHandle } from "../checkpointer.js";
 import type { ApiEnv } from "../env.js";
-import { CHECKPOINTER, ENV, MODEL } from "../tokens.js";
+import { CHECKPOINTER, ENV, MEMORY, MODEL } from "../tokens.js";
 import type { DecisionDto, StartRunDto } from "./dto/runs.dto.js";
 
 const REJECTION_MARKER = "Rejected final draft.";
+
+/** Graph nodes that surface their work through returned messages (vs. builder's draft). */
+const MESSAGE_NODES = new Set(["analyst", "architect", "worker", "lead"]);
+/** Project-graph nodes whose system messages we surface (router decision, memory ops). */
+const SYSTEM_NODES = new Set(["retrieveContext", "router", "persistMemory"]);
 
 /** Rubric registry — extend here when product-specific rubrics land. */
 const RUBRICS: Record<string, Rubric> = {
@@ -43,6 +59,9 @@ interface RunMeta {
   status: ApiRunStatus;
   events: ReplaySubject<RunEvent>;
   abort: AbortController;
+  /** The exact compiled graph this run uses — reused for resume so topology matches. */
+  graph: AgentGraph;
+  projectId?: string;
 }
 
 type GraphInput = Parameters<AgentGraph["stream"]>[0];
@@ -56,6 +75,7 @@ export class RunsService implements OnModuleDestroy {
     @Inject(ENV) private readonly env: ApiEnv,
     @Inject(MODEL) private readonly model: BaseChatModel,
     @Inject(CHECKPOINTER) private readonly checkpointer: CheckpointerHandle,
+    @Inject(MEMORY) private readonly memory: MemoryService | null,
   ) {}
 
   async onModuleDestroy(): Promise<void> {
@@ -63,21 +83,101 @@ export class RunsService implements OnModuleDestroy {
     await this.checkpointer.close();
   }
 
-  private makeGraph(options?: StartRunDto["options"], rubricId?: string): AgentGraph {
+  private rubricFor(rubricId?: string): Rubric {
     const rubric = RUBRICS[rubricId ?? "default"];
     if (!rubric) {
       throw new NotFoundException(
         `Unknown rubricId '${rubricId}'. Available: ${Object.keys(RUBRICS).join(", ")}`,
       );
     }
+    return rubric;
+  }
+
+  private guardrails(options?: StartRunDto["options"]) {
+    return {
+      maxRounds: options?.maxRounds ?? this.env.MAX_ROUNDS,
+      tokenBudget: this.env.RUN_TOKEN_BUDGET,
+    };
+  }
+
+  /** Builder↔critic graph — used for starting text runs and for reading/resuming any run's state. */
+  private makeGraph(options?: StartRunDto["options"], rubricId?: string): AgentGraph {
     return createAgentGraph({
       model: this.model,
       checkpointer: this.checkpointer.saver,
-      rubric,
-      guardrails: {
-        maxRounds: options?.maxRounds ?? this.env.MAX_ROUNDS,
-        tokenBudget: this.env.RUN_TOKEN_BUDGET,
-      },
+      rubric: this.rubricFor(rubricId),
+      guardrails: this.guardrails(options),
+    });
+  }
+
+  /**
+   * Validate a client-supplied repo path against REPO_ALLOWED_ROOTS and return
+   * its resolved absolute form. Public so ProjectsController can validate a
+   * repo before persisting it on a project. Throws BadRequest if out of bounds.
+   */
+  validateRepoPath(repoPath: string): string {
+    return this.resolveRepoPath(repoPath);
+  }
+
+  /** Validate a client-supplied repo path against REPO_ALLOWED_ROOTS (if configured). */
+  private resolveRepoPath(repoPath: string): string {
+    const abs = resolve(repoPath);
+    const roots = this.env.REPO_ALLOWED_ROOTS;
+    if (roots.length > 0) {
+      const ok = roots.some((root) => {
+        const r = resolve(root);
+        const rel = relative(r, abs);
+        return abs === r || (!rel.startsWith("..") && !rel.startsWith(`..${sep}`));
+      });
+      if (!ok) {
+        throw new BadRequestException(
+          `repoPath must be within an allowed root: ${roots.join(", ")}`,
+        );
+      }
+    }
+    return abs;
+  }
+
+  /** Team graph: architect → workers → lead, challenged by the critic. */
+  private makeTeamGraph(options?: StartRunDto["options"], rubricId?: string) {
+    return createTeamGraph({
+      model: this.model,
+      checkpointer: this.checkpointer.saver,
+      rubric: this.rubricFor(rubricId),
+      guardrails: this.guardrails(options),
+    });
+  }
+
+  private requireMemory(): MemoryService {
+    if (!this.memory) {
+      throw new BadRequestException(
+        "Project tasks need memory — set SUPABASE_DB_URL + MISTRAL_API_KEY.",
+      );
+    }
+    return this.memory;
+  }
+
+  /** Project graph: retrieveContext → router → (single | team) → gate → persistMemory. */
+  private makeProjectGraph(options?: StartRunDto["options"], rubricId?: string): AgentGraph {
+    return createProjectGraph({
+      model: this.model,
+      memory: this.requireMemory(),
+      checkpointer: this.checkpointer.saver,
+      rubric: this.rubricFor(rubricId),
+      guardrails: this.guardrails(options),
+    }) as unknown as AgentGraph;
+  }
+
+  /** Grounded repo-analysis graph: a tool-using analyst (read-only) refined by the critic. */
+  private makeRepoGraph(repoPath: string, options?: StartRunDto["options"], rubricId?: string) {
+    return createRepoAnalysisGraph({
+      model: this.model,
+      checkpointer: this.checkpointer.saver,
+      rubric: this.rubricFor(rubricId),
+      guardrails: this.guardrails(options),
+      tools: createRepoTools(this.resolveRepoPath(repoPath), {
+        allowedChecks: this.env.REPO_ALLOWED_CHECKS,
+      }),
     });
   }
 
@@ -85,21 +185,92 @@ export class RunsService implements OnModuleDestroy {
     return { configurable: { thread_id: runId }, signal };
   }
 
+  /**
+   * The graph to read/resume a run with. Reuses the run's own compiled graph
+   * when in memory; after a restart, falls back to the project graph (which
+   * routes by the persisted topology) or the builder graph if memory is off.
+   */
+  private graphFor(runId: string): AgentGraph {
+    const meta = this.runs.get(runId);
+    if (meta) return meta.graph;
+    return this.memory ? this.makeProjectGraph() : this.makeGraph();
+  }
+
+  /** Repos the worker can be pointed at — discovered under REPO_ALLOWED_ROOTS. */
+  listRepos(): Promise<RepoInfo[]> {
+    return discoverRepos(this.env.REPO_ALLOWED_ROOTS);
+  }
+
   start(dto: StartRunDto): StartRunResponse {
+    const graph = dto.repoPath
+      ? (this.makeRepoGraph(dto.repoPath, dto.options, dto.rubricId) as unknown as AgentGraph)
+      : dto.mode === "team"
+        ? (this.makeTeamGraph(dto.options, dto.rubricId) as unknown as AgentGraph)
+        : this.makeGraph(dto.options, dto.rubricId);
     const runId = randomUUID();
-    const graph = this.makeGraph(dto.options, dto.rubricId);
+    return this.launch(runId, dto.task, graph, { task: dto.task, status: "running" });
+  }
+
+  /**
+   * Start a task scoped to a project. Uses the repo-analysis graph when a repo
+   * is given, otherwise the project graph (router → single/team + memory).
+   * `projectId` may be "scratch" to fall back to the implicit project.
+   */
+  async startProjectTask(
+    projectId: string,
+    task: string,
+    repoPath?: string,
+  ): Promise<StartRunResponse> {
+    const memory = this.requireMemory();
+    let project =
+      projectId === "scratch"
+        ? await this.scratchProject()
+        : await memory.getProject(projectId);
+    if (!project) throw new NotFoundException(`No project ${projectId}`);
+
+    // Per-task repoPath overrides the project's bound repo; otherwise the task
+    // inherits whatever repo the project is configured with (settings.repoPath).
+    const projectRepo =
+      typeof project.settings?.repoPath === "string" ? project.settings.repoPath : undefined;
+    const effectiveRepo = repoPath ?? projectRepo;
+
+    const row = await memory.createTask(project.id, task);
+    const runId = row.id; // task id doubles as the run/thread id
+    const graph = effectiveRepo
+      ? (this.makeRepoGraph(effectiveRepo) as unknown as AgentGraph)
+      : this.makeProjectGraph();
+
+    return this.launch(runId, task, graph, { task, projectId: project.id, status: "running" }, project.id);
+  }
+
+  private async scratchProject() {
+    const memory = this.requireMemory();
+    const existing = (await memory.listProjects()).find((p) => p.name === "Scratch");
+    return existing ?? memory.createProject("Scratch", "Ad-hoc tasks without a dedicated project.");
+  }
+
+  /** Register a run, kick off its graph with the timeout/error harness, and return the handle. */
+  private launch(
+    runId: string,
+    task: string,
+    graph: AgentGraph,
+    input: GraphInput,
+    projectId?: string,
+  ): StartRunResponse {
     const meta: RunMeta = {
       runId,
-      task: dto.task,
+      task,
       createdAt: new Date().toISOString(),
       status: "running",
       events: new ReplaySubject<RunEvent>(),
       abort: new AbortController(),
+      graph,
+      projectId,
     };
     this.runs.set(runId, meta);
 
     const timeout = setTimeout(() => meta.abort.abort(), this.env.RUN_TIMEOUT_MS);
-    void this.consume(graph, meta, { task: dto.task, status: "running" })
+    void this.consume(graph, meta, input)
       .catch((err: unknown) => {
         meta.status = "failed";
         meta.events.next({
@@ -119,36 +290,75 @@ export class RunsService implements OnModuleDestroy {
 
   /** Drive one graph segment and translate updates into typed wire events. */
   private async consume(graph: AgentGraph, meta: RunMeta, input: GraphInput): Promise<void> {
+    // Two modes at once: "messages" gives token-by-token LLM output (live
+    // typing), "updates" gives the finalized per-node state delta.
     const stream = await graph.stream(input, {
       ...this.config(meta.runId, meta.abort.signal),
-      streamMode: "updates",
+      streamMode: ["messages", "updates"],
     });
 
-    for await (const chunk of stream) {
-      const update = chunk as Record<string, Partial<GraphStateType>>;
+    for await (const [mode, data] of stream as AsyncIterable<[string, unknown]>) {
+      if (mode === "messages") {
+        const [msg, metadata] = data as [
+          { content?: unknown },
+          { langgraph_node?: string } | undefined,
+        ];
+        const node = metadata?.langgraph_node;
+        const text = typeof msg?.content === "string" ? msg.content : "";
+        // Stream the builder's natural-language tokens live. The critic emits
+        // structured JSON, and the analyst makes many intermediate tool-deciding
+        // calls — neither is useful to stream token-by-token.
+        if (text && node === "builder") {
+          meta.events.next({ type: "token", node, content: text });
+        }
+        continue;
+      }
+
+      const update = data as Record<string, Partial<GraphStateType>>;
       for (const [node, patch] of Object.entries(update)) {
         if (node === "builder" && patch) {
+          // Finalize the streamed message with the authoritative full draft.
           meta.events.next({
             type: "node",
             node: "builder",
             round: patch.round ?? 0,
             content: patch.draft ?? "",
+            tokens: patch.tokensUsed,
           });
+        } else if (MESSAGE_NODES.has(node) && patch) {
+          // analyst / architect / worker / lead surface their work via the
+          // messages they returned (tool traces, plan, step outputs, synthesis).
+          for (const m of patch.messages ?? []) {
+            meta.events.next({
+              type: "node",
+              node: node as "analyst" | "architect" | "worker" | "lead",
+              round: patch.round ?? 0,
+              content: m.content,
+              tokens: patch.tokensUsed,
+            });
+          }
         } else if (node === "critic" && patch?.verdict) {
-          const round = await this.currentRound(graph, meta.runId);
-          meta.events.next({
-            type: "node",
-            node: "critic",
-            round,
-            content: patch.verdict.issues.join("\n") || "no issues",
-          });
           meta.events.next({
             type: "verdict",
-            round,
+            round: await this.currentRound(graph, meta.runId),
             pass: patch.verdict.pass,
             score: patch.verdict.score,
             issues: patch.verdict.issues,
+            criteria: patch.verdict.criteria,
+            tokens: patch.tokensUsed,
           });
+        } else if (SYSTEM_NODES.has(node) && patch) {
+          // retrieveContext / router / persistMemory — surface their system note
+          // (e.g. "Router → team: …", "Retrieved brief + N memories").
+          for (const m of patch.messages ?? []) {
+            meta.events.next({
+              type: "node",
+              node: "system",
+              round: patch.round ?? 0,
+              content: m.content,
+              tokens: patch.tokensUsed,
+            });
+          }
         }
       }
     }
@@ -161,6 +371,7 @@ export class RunsService implements OnModuleDestroy {
     if (interrupted) {
       meta.status = "awaiting_human";
       meta.events.next({ type: "awaiting_human", runId: meta.runId });
+      void this.syncTask(meta, state);
       return; // subject stays open — decision() continues it
     }
 
@@ -170,7 +381,23 @@ export class RunsService implements OnModuleDestroy {
       status: meta.status,
       result: { draft: state.draft, verdict: state.verdict },
     });
+    void this.syncTask(meta, state);
     meta.events.complete();
+  }
+
+  /** Mirror a project run's progress into the tasks table (best-effort). */
+  private async syncTask(meta: RunMeta, state: GraphStateType): Promise<void> {
+    if (!meta.projectId || !this.memory) return;
+    try {
+      await this.memory.updateTask(meta.runId, {
+        status: meta.status,
+        topology: state.topology,
+        draft: state.draft,
+        verdict: state.verdict as unknown,
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   private async currentRound(graph: AgentGraph, runId: string): Promise<number> {
@@ -190,7 +417,7 @@ export class RunsService implements OnModuleDestroy {
   }
 
   async getRun(runId: string): Promise<RunDetail> {
-    const graph = this.makeGraph();
+    const graph = this.graphFor(runId);
     const snapshot = await graph.getState(this.config(runId));
     const state = snapshot.values as GraphStateType | undefined;
     if (!state || !state.task) {
@@ -200,8 +427,10 @@ export class RunsService implements OnModuleDestroy {
     return {
       runId,
       threadId: runId,
+      task: state.task,
       status: interrupted ? "awaiting_human" : this.mapStatus(state),
       round: state.round,
+      tokensUsed: state.tokensUsed,
       draft: state.draft,
       verdict: state.verdict,
       messages: state.messages,
@@ -214,8 +443,33 @@ export class RunsService implements OnModuleDestroy {
       .map(({ runId, task, status, createdAt }) => ({ runId, task, status, createdAt }));
   }
 
+  /** Delete a run: stop any live work, drop it from the registry, and erase its checkpointer thread. */
+  async deleteRun(runId: string): Promise<void> {
+    const meta = this.runs.get(runId);
+    if (meta) {
+      meta.abort.abort();
+      meta.events.complete();
+      this.runs.delete(runId);
+    }
+    const saver = this.checkpointer.saver as {
+      deleteThread?: (threadId: string) => Promise<void>;
+    };
+    if (typeof saver.deleteThread === "function") {
+      await saver.deleteThread(runId);
+    }
+    // The run id doubles as the project-task id; drop the persisted row too so
+    // the project's task list (which the sidebar reads) stays in sync.
+    if (this.memory) {
+      try {
+        await this.memory.deleteTask(runId);
+      } catch {
+        /* best-effort — the run is already gone from the registry */
+      }
+    }
+  }
+
   async decide(runId: string, dto: DecisionDto): Promise<DecisionResponse> {
-    const graph = this.makeGraph();
+    const graph = this.graphFor(runId);
     const snapshot = await graph.getState(this.config(runId));
     const state = snapshot.values as GraphStateType | undefined;
     if (!state || !state.task) {
@@ -238,22 +492,20 @@ export class RunsService implements OnModuleDestroy {
         status: "awaiting_human",
         events: new ReplaySubject<RunEvent>(),
         abort: new AbortController(),
+        graph,
+        projectId: state.projectId || undefined,
       };
       this.runs.set(runId, meta);
     }
 
-    await this.consume(graph, meta, new Command({ resume: dto.decision }) as GraphInput);
-
-    if (dto.notes) {
-      // Attach reviewer notes to the persisted transcript (post-terminal, best effort).
-      try {
-        await graph.updateState(this.config(runId), {
-          messages: [{ agent: "human", role: "user", content: `Reviewer notes: ${dto.notes}` }],
-        });
-      } catch {
-        // non-fatal: notes still live in the HTTP audit trail of the caller
-      }
-    }
+    // Resume with the decision + notes. On 'revise' the graph loops back to the
+    // builder with the notes as guidance, streams the new round(s), and pauses
+    // at the gate again (or terminates) — all handled inside consume().
+    await this.consume(
+      graph,
+      meta,
+      new Command({ resume: { decision: dto.decision, notes: dto.notes } }) as GraphInput,
+    );
 
     return { runId, status: meta.status };
   }

@@ -15,6 +15,16 @@ const EnvSchema = z
     MAX_ROUNDS: z.coerce.number().int().min(1).default(3),
     RUN_TOKEN_BUDGET: z.coerce.number().int().min(1).optional(),
     RUN_TIMEOUT_MS: z.coerce.number().int().min(1).default(300_000),
+    // Commands an agent is allowed to run via the run_check tool (Layer 2).
+    REPO_ALLOWED_CHECKS: z
+      .string()
+      .default("test,lint,typecheck,build")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      ),
     LANGSMITH_TRACING: z
       .enum(["true", "false"])
       .default("false")

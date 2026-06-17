@@ -3,6 +3,7 @@ packages:
   - "apps/*"
 allowBuilds:
   esbuild: true
+  sharp: true
 minimumReleaseAgeExclude:
   - '@langchain/anthropic@1.4.1'
   - '@langchain/core@1.1.49'

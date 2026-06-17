@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
     "smoke": "tsc -p tsconfig.json && tsx smoke.ts"
   },
   "dependencies": {

@@ -96,6 +96,7 @@ async function runSegment(
   input: GraphInput,
   config: { configurable: { thread_id: string }; signal: AbortSignal },
 ): Promise<HumanGatePayload | null> {
+  console.log("\n⏳ Agenterne arbejder… (hvert trin er et LLM-kald og kan tage 15-30s)");
   const stream = await graph.stream(input, {
     ...config,
     streamMode: "updates",
@@ -154,7 +155,7 @@ async function main(): Promise<void> {
 
   console.log(
     `thread: ${threadId} | provider: ${env.LLM_PROVIDER} | checkpointer: ${
-      checkpointer.persistent ? "supabase/postgres" : "memory"
+      checkpointer.persistent ? "postgres" : "memory"
     } | max rounds: ${env.MAX_ROUNDS}`,
   );
 

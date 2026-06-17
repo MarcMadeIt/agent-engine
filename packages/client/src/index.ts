@@ -1,6 +1,10 @@
 import type {
   DecisionRequest,
   DecisionResponse,
+  Project,
+  ProjectTask,
+  RepoInfo,
+  Rubric,
   RunDetail,
   RunEvent,
   RunSummary,
@@ -66,6 +70,38 @@ export class AgentClient {
 
   listRuns(): Promise<RunSummary[]> {
     return this.request("/runs");
+  }
+
+  listRepos(): Promise<RepoInfo[]> {
+    return this.request("/repos");
+  }
+
+  listProjects(): Promise<Project[]> {
+    return this.request("/projects");
+  }
+
+  createProject(name: string, brief = ""): Promise<Project> {
+    return this.request("/projects", {
+      method: "POST",
+      body: JSON.stringify({ name, brief }),
+    });
+  }
+
+  deleteProject(id: string): Promise<{ ok: true }> {
+    return this.request(`/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  listProjectTasks(id: string): Promise<ProjectTask[]> {
+    return this.request(`/projects/${encodeURIComponent(id)}/tasks`);
+  }
+
+  /** The active Definition of Done the critic scores drafts against. */
+  getRubric(): Promise<Rubric> {
+    return this.request("/rubric");
+  }
+
+  deleteRun(runId: string): Promise<{ ok: true }> {
+    return this.request(`/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
   }
 
   decide(runId: string, decision: DecisionRequest): Promise<DecisionResponse> {
