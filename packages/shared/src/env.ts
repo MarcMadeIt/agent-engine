@@ -25,6 +25,16 @@ const EnvSchema = z
           .map((x) => x.trim())
           .filter(Boolean),
       ),
+    // Executables an autonomous mission may run via runCommand (M2, no shell).
+    REPO_ALLOWED_COMMANDS: z
+      .string()
+      .default("git,node,pnpm,npm,npx")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+      ),
     LANGSMITH_TRACING: z
       .enum(["true", "false"])
       .default("false")

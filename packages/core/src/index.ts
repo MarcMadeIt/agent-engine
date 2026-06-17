@@ -12,7 +12,7 @@ export {
   type TeamGraph,
   type ProjectGraph,
 } from "./graph.js";
-export type { RepoTools } from "./tools.js";
+export type { RepoTools, WritableRepoTools } from "./tools.js";
 export type {
   ProjectMemory,
   MemoryKind,

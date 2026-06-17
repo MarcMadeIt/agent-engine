@@ -1,7 +1,11 @@
 export { loadEnv, cleanEnv, type Env } from "./env.js";
 export { createSupabaseClient } from "./supabase.js";
 export { getModel } from "./llm.js";
-export { createRepoTools, type RepoToolsOptions } from "./repoTools.js";
+export {
+  createRepoTools,
+  createWritableRepoTools,
+  type RepoToolsOptions,
+} from "./repoTools.js";
 export { discoverRepos, type RepoInfo } from "./repos.js";
 export {
   MemoryService,
@@ -36,7 +40,10 @@ export {
 } from "./notifier.js";
 export {
   runCheckProcess,
+  runAllowedCommand,
   truncateTail,
   DEFAULT_ALLOWED_CHECKS,
+  DEFAULT_ALLOWED_COMMANDS,
   type CheckRun,
+  type CommandRun,
 } from "./checks.js";

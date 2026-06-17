@@ -1,9 +1,18 @@
-import { readdir, readFile as fsReadFile, stat } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
-import type { RepoTools } from "@arzonic/agent-core";
+import {
+  mkdir,
+  readdir,
+  readFile as fsReadFile,
+  stat,
+  unlink,
+  writeFile as fsWriteFile,
+} from "node:fs/promises";
+import { dirname, relative, resolve, sep } from "node:path";
+import type { RepoTools, WritableRepoTools } from "@arzonic/agent-core";
 import {
   DEFAULT_ALLOWED_CHECKS,
+  DEFAULT_ALLOWED_COMMANDS,
   MAX_CHECK_OUTPUT,
+  runAllowedCommand,
   runCheckProcess,
   truncateTail,
 } from "./checks.js";
@@ -23,31 +32,24 @@ const IGNORE_DIRS = new Set([
 const MAX_FILE_BYTES = 60_000;
 const MAX_SEARCH_HITS = 60;
 const MAX_SEARCH_FILE_BYTES = 400_000;
+const MAX_WRITE_BYTES = 1_000_000;
 
 export interface RepoToolsOptions {
   /** Command names runCheck may run via `pnpm run <name>`. Defaults to test/lint/typecheck/build. */
   allowedChecks?: string[];
+  /** Executables `runCommand` may spawn (writable tools only). Defaults to git/node/pnpm/npm/npx. */
+  allowedCommands?: string[];
 }
 
 const TEXT_EXT =
   /\.(ts|tsx|js|jsx|mjs|cjs|json|md|mdx|yml|yaml|sql|env|sh|css|scss|html|txt|toml|prisma|graphql)$/i;
 
 /**
- * Read-only, path-sandboxed implementation of the core RepoTools contract.
- * Every path is resolved and verified to stay within `rootArg`; there is no
- * write capability and no command execution. Layer 1.
+ * Resolve+verify a repo-relative path stays inside `root`. Shared by the
+ * read-only and write tools so writes can never escape the worktree root either.
  */
-export function createRepoTools(
-  rootArg: string,
-  options: RepoToolsOptions = {},
-): RepoTools {
-  const root = resolve(rootArg);
-  const allowedChecks =
-    options.allowedChecks && options.allowedChecks.length > 0
-      ? options.allowedChecks
-      : DEFAULT_ALLOWED_CHECKS;
-
-  const within = (p: string): string => {
+function makeWithin(root: string) {
+  return (p: string): string => {
     const abs = resolve(root, p);
     const rel = relative(root, abs);
     if (rel === ".." || rel.startsWith(`..${sep}`)) {
@@ -55,28 +57,35 @@ export function createRepoTools(
     }
     return abs;
   };
+}
 
-  async function walk(dir: string, out: string[]): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
+async function walk(dir: string, out: string[]): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith(".") && e.name !== ".env.example") {
+      // skip dotfiles/dirs except a couple useful ones
+      if (e.isDirectory()) continue;
     }
-    for (const e of entries) {
-      if (e.name.startsWith(".") && e.name !== ".env.example") {
-        // skip dotfiles/dirs except a couple useful ones
-        if (e.isDirectory()) continue;
-      }
-      if (e.isDirectory()) {
-        if (IGNORE_DIRS.has(e.name)) continue;
-        await walk(resolve(dir, e.name), out);
-      } else if (TEXT_EXT.test(e.name)) {
-        out.push(resolve(dir, e.name));
-      }
+    if (e.isDirectory()) {
+      if (IGNORE_DIRS.has(e.name)) continue;
+      await walk(resolve(dir, e.name), out);
+    } else if (TEXT_EXT.test(e.name)) {
+      out.push(resolve(dir, e.name));
     }
   }
+}
 
+/** The read-only tool set (Layer 1 + 2), shared by both factories. */
+function makeReadTools(
+  root: string,
+  within: (p: string) => string,
+  allowedChecks: string[],
+): RepoTools {
   return {
     async listFiles(dir) {
       const abs = within(dir || ".");
@@ -122,9 +131,7 @@ export function createRepoTools(
           }
         }
       }
-      return hits.length
-        ? hits.join("\n")
-        : `No matches for "${query}".`;
+      return hits.length ? hits.join("\n") : `No matches for "${query}".`;
     },
 
     async runCheck(name) {
@@ -132,6 +139,104 @@ export function createRepoTools(
       const { allowed, status, output } = await runCheckProcess(root, clean, allowedChecks);
       if (!allowed) return output;
       return `$ pnpm run ${clean}\n(${status})\n\n${truncateTail(output.trim() || "(no output)", MAX_CHECK_OUTPUT)}`;
+    },
+  };
+}
+
+function resolveAllowedChecks(options: RepoToolsOptions): string[] {
+  return options.allowedChecks && options.allowedChecks.length > 0
+    ? options.allowedChecks
+    : DEFAULT_ALLOWED_CHECKS;
+}
+
+/**
+ * Read-only, path-sandboxed implementation of the core RepoTools contract.
+ * Every path is resolved and verified to stay within `rootArg`; there is no
+ * write capability and no command execution. Layer 1 + 2.
+ */
+export function createRepoTools(
+  rootArg: string,
+  options: RepoToolsOptions = {},
+): RepoTools {
+  const root = resolve(rootArg);
+  return makeReadTools(root, makeWithin(root), resolveAllowedChecks(options));
+}
+
+/**
+ * Write-capable, path-sandboxed implementation of `WritableRepoTools` for
+ * autonomous mission execution (M2 build-order Trin 1). Adds writeFile /
+ * applyEdit / deleteFile / runCommand on top of the read-only tools. Writes are
+ * confined to `rootArg` by the same `within` guard; `runCommand` runs an
+ * allowlisted executable with NO shell (no `&&`/pipe/`$(...)` interpolation),
+ * cwd = the root. Hand this only to mission flows — task/builder runs get the
+ * read-only `createRepoTools` so writes can't leak into them.
+ */
+export function createWritableRepoTools(
+  rootArg: string,
+  options: RepoToolsOptions = {},
+): WritableRepoTools {
+  const root = resolve(rootArg);
+  const within = makeWithin(root);
+  const allowedCommands =
+    options.allowedCommands && options.allowedCommands.length > 0
+      ? options.allowedCommands
+      : DEFAULT_ALLOWED_COMMANDS;
+
+  return {
+    ...makeReadTools(root, within, resolveAllowedChecks(options)),
+
+    async writeFile(path, content) {
+      const abs = within(path);
+      const bytes = Buffer.byteLength(content, "utf8");
+      if (bytes > MAX_WRITE_BYTES) {
+        throw new Error(`Refusing to write ${bytes} bytes to ${path} (max ${MAX_WRITE_BYTES}).`);
+      }
+      try {
+        const s = await stat(abs);
+        if (s.isDirectory()) throw new Error(`${path} is a directory, not a file`);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      }
+      await mkdir(dirname(abs), { recursive: true });
+      await fsWriteFile(abs, content, "utf8");
+      return `Wrote ${bytes} bytes to ${path}`;
+    },
+
+    async applyEdit(path, oldString, newString) {
+      const abs = within(path);
+      const s = await stat(abs);
+      if (s.isDirectory()) throw new Error(`${path} is a directory, not a file`);
+      const current = await fsReadFile(abs, "utf8");
+      if (oldString === newString) {
+        throw new Error(`applyEdit on ${path}: oldString and newString are identical — no change.`);
+      }
+      const first = current.indexOf(oldString);
+      if (first === -1) {
+        throw new Error(`applyEdit on ${path}: oldString not found.`);
+      }
+      if (current.indexOf(oldString, first + 1) !== -1) {
+        throw new Error(
+          `applyEdit on ${path}: oldString appears more than once — add surrounding context to make it unique.`,
+        );
+      }
+      const next = current.slice(0, first) + newString + current.slice(first + oldString.length);
+      await fsWriteFile(abs, next, "utf8");
+      return `Edited ${path} (1 replacement)`;
+    },
+
+    async deleteFile(path) {
+      const abs = within(path);
+      const s = await stat(abs);
+      if (s.isDirectory()) throw new Error(`${path} is a directory, not a file`);
+      await unlink(abs);
+      return `Deleted ${path}`;
+    },
+
+    async runCommand(command, args = []) {
+      const { allowed, status, output } = await runAllowedCommand(root, command, args, allowedCommands);
+      const shown = `${command}${args.length ? ` ${args.join(" ")}` : ""}`;
+      if (!allowed) return output;
+      return `$ ${shown}\n(${status})\n\n${truncateTail(output.trim() || "(no output)", MAX_CHECK_OUTPUT)}`;
     },
   };
 }

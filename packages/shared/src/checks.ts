@@ -13,6 +13,13 @@ export const DEFAULT_ALLOWED_CHECKS = ["test", "lint", "typecheck", "build"];
 export const CHECK_TIMEOUT_MS = 120_000;
 export const MAX_CHECK_OUTPUT = 10_000;
 
+/**
+ * Executables an autonomous mission may run via `WritableRepoTools.runCommand`
+ * (M2 build-order Trin 1). Bare names only — resolved on PATH, never a path with
+ * separators — and run WITHOUT a shell, so `&&`/pipe/`$(...)` cannot interpolate.
+ */
+export const DEFAULT_ALLOWED_COMMANDS = ["git", "node", "pnpm", "npm", "npx"];
+
 export interface CheckRun {
   /** false when `name` wasn't on the allowlist — the command was NOT executed. */
   allowed: boolean;
@@ -78,6 +85,70 @@ export function runCheckProcess(
       const status = killed
         ? `timed out after ${CHECK_TIMEOUT_MS}ms`
         : `exit code ${code}`;
+      resolve({ allowed: true, passed: !killed && code === 0, status, output });
+    });
+  });
+}
+
+export interface CommandRun {
+  /** false when the executable wasn't on the allowlist — nothing was spawned. */
+  allowed: boolean;
+  /** true only when allowed and the process exited 0. */
+  passed: boolean;
+  /** "exit code N" | "timed out after …" | "not allowed" | "spawn error". */
+  status: string;
+  /** Combined stdout/stderr (untruncated; callers trim for display). */
+  output: string;
+}
+
+/**
+ * Run one allowlisted executable with literal arguments and NO shell, in `cwd`
+ * (M2 build-order Trin 1, used by `WritableRepoTools.runCommand`). The command
+ * must be a bare name on `allowedCommands` — a name containing a path separator
+ * is rejected so an agent can't reach an executable outside the allowlist. With
+ * `shell: false`, arguments are passed verbatim to the process, so `&&`, pipes
+ * and `$(...)` are inert text, never interpreted.
+ */
+export function runAllowedCommand(
+  cwd: string,
+  command: string,
+  args: string[],
+  allowedCommands: string[],
+): Promise<CommandRun> {
+  const clean = command.trim();
+  if (!clean || clean.includes("/") || clean.includes("\\") || !allowedCommands.includes(clean)) {
+    return Promise.resolve({
+      allowed: false,
+      passed: false,
+      status: "not allowed",
+      output: `Command "${command}" is not allowed. Allowed commands: ${allowedCommands.join(", ")}.`,
+    });
+  }
+  return new Promise((resolve) => {
+    const child = spawn(clean, args, {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    let output = "";
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill("SIGKILL");
+    }, CHECK_TIMEOUT_MS);
+    const collect = (d: Buffer) => {
+      output += d.toString();
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      resolve({ allowed: true, passed: false, status: "spawn error", output: `${output}\n${e.message}` });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      const status = killed ? `timed out after ${CHECK_TIMEOUT_MS}ms` : `exit code ${code}`;
       resolve({ allowed: true, passed: !killed && code === 0, status, output });
     });
   });

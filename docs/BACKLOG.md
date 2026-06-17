@@ -4,7 +4,7 @@
 > komme. Opdatér den løbende: kryds af, flyt punkter mellem sektioner, og log
 > leverede ting under **Senest leveret**.
 
-**Sidst opdateret:** 2026-06-16
+**Sidst opdateret:** 2026-06-17
 
 ## 🌙 Nordstjerne — Autonome missioner
 
@@ -47,6 +47,21 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 ---
 
 ## ✅ Senest leveret
+
+### 2026-06-17 — M2 Trin 1: Write-laget i RepoTools (springet mod kørende kode)
+- [x] Ny `WritableRepoTools extends RepoTools` i core ([packages/core/src/tools.ts](../packages/core/src/tools.ts)):
+      `writeFile` / `applyEdit` / `deleteFile` / `runCommand` — **separat interface**, ikke optional
+      metoder, så read-only flows (task/builder/analyst) får et objekt **uden** write-metoder → writes
+      kan ikke lække ind i ikke-mission-kørsler (strukturel garanti).
+- [x] `createWritableRepoTools(root)` i shared ([packages/shared/src/repoTools.ts](../packages/shared/src/repoTools.ts)):
+      writes path-confined af samme `within()`-sandbox som læsning; `applyEdit` kræver **unik** match
+      (fejler på 0/≥2 forekomster + no-op) → ingen stille fejledit; `writeFile` opretter parent-dirs (cap 1 MB).
+- [x] `runAllowedCommand()` ([packages/shared/src/checks.ts](../packages/shared/src/checks.ts)): allowlistet
+      eksekverbar, **`shell: false` + array-args** → `&&`/pipe/`$(...)` er inert; bare navne (path-separator afvist),
+      cwd = root, hard timeout. `REPO_ALLOWED_COMMANDS` (default `git,node,pnpm,npm,npx`) i env + `.env.example`.
+- [x] Bevist ([packages/shared/verify-repo-write.ts](../packages/shared/verify-repo-write.ts), 19 checks):
+      write/edit/delete inde i roden, sandbox-escape afvist, runCommand kun allowlistet + ingen shell-interpolation,
+      og read-only-factory eksponerer **ingen** write-metoder. `turbo build` grøn (6/6).
 
 ### 2026-06-17 — Projekt-først UX: Opgave|Mission-toggle, missioner under projektet
 - [x] Segmented toggle (**Opgave | Mission**) i projekt-composeren ([apps/web/app/page.tsx](../apps/web/app/page.tsx)) —
@@ -256,14 +271,63 @@ Build-order, hvert trin shippes + bevises for sig:
 - [ ] **8. Mission-API + PM2-worker + dashboard** — `POST /missions` m.fl., baggrunds-worker,
       backlog-board / live aktivitet / digest. *(i gang)*
 
-### 🛠️ M2/M3 — Fra motor til byg + kvalitet & tillid (Phase 5, efter Trin 8)
+### 🛠️ M2 — Fra motor til byg (Phase 5, efter Trin 8)
 
-Når motoren kører autonomt, er det her der afgør om output faktisk *virker* og kan stoles på:
+Mål: agenter skriver rigtige filer + kører kommandoer i isolerede git-worktrees, så
+Verifier validerer **faktisk forfattet kode** — og flere workers kan køre parallelt
+uden at træde på hinanden. Springet fra "laver en plan" til "laver kørende kode".
 
-- [ ] **Skrive-capable eksekvering (den store).** Agenter skal kunne skrive filer, køre
-      kommandoer og scaffolde i isolerede git-worktrees — i dag er repo-værktøjerne læse-only.
-      Springet fra "laver en plan" til "laver kørende kode".
-- [ ] **Parallelisme.** Flere workers i hver sin worktree + integration/merge ("sæt folk i gang").
+Build-order (shippet + bevist pr. trin, som M1):
+
+- [x] **1. Write-laget i RepoTools** — `writeFile` / `applyEdit` / `deleteFile` /
+      `runCommand`, path-confined til `REPO_ALLOWED_ROOTS`. (`tools.ts` + `repoTools.ts`)
+- [ ] **2. Worktree-manager** (injiceret søm i `shared`, som BacklogStore/Verifier) —
+      worktree pr. item på en mission-branch, oprydning + `git worktree prune` ved crash.
+- [ ] **3. Implementer-node med write-tools** — wrap write-tools som LangChain `tool()`
+      + `bindTools` (samme mønster som [analyst.ts](../packages/core/src/nodes/analyst.ts)).
+      **Bliver en agentisk ReAct-loop** med egen terminering (max tool-iterationer +
+      token-budget) — ikke single-shot som worker/builder i dag. Gate write-tools til
+      mission/kode, så de **ikke lækker ind i builders single-mode tekst-opgaver**
+      (overvej en dedikeret implementer-node frem for at overloade builder).
+- [ ] **4. WorkRunner i worktree** — `createGraphWorkRunner` peger repo-tools mod item'ets
+      worktree → Verifier checker den forfattede kode dér. (`runner.ts`)
+- [ ] **5. Integration + verificér-efter-merge** — verify i worktree → merge mission-branch
+      → **re-verify på mission-branch** (to grønne items kan summe til rød main). Konflikt →
+      park `blocked_needs_human`.
+- [ ] **6. Parallelisme** *(egen epic, sidst, konservativt)* — N actionable items samtidigt,
+      hver i egen worktree. Lead tildeler **ikke-overlappende fil-scopes**, ellers merge
+      **sekventielt** (rebase næste på forrige). Start med seriel-i-worktrees (1–5).
+
+Sikkerheds-invarianter:
+
+- Path-sandbox (`within()`) gælder også writes — ingen escape fra worktree-roden.
+- **`runCommand` er IKKE dækket af path-sandbox** (M2's #1 risiko): allowliste eksekverbare
+  **uden shell-interpolation** (ingen `&&` / pipe / `$(...)`), cwd = worktree; OS-isolation
+  (container/nsjail) på sigt. High-risk → `classifyRisk` parkerer (jf. `humanPolicy.ts`).
+- `classifyRisk` inspicerer **tool-kaldene**, ikke kun item-titlen (kommando udenfor
+  allowliste, pakke-installs, edits til CI/deploy/secrets/migrations → high).
+- Core ren: worktree-manager injiceres; branch-navne/timestamps sendes ind (ingen
+  `Date.now()` i core). "Done" = Verifier-pass før **og** efter merge.
+- Deps: beslut delt pnpm-store/symlink vs. install pr. worktree (perf/disk) før Trin 4.
+
+Build-vs-adopt (LangChain):
+
+- **`createReactAgent`** (`@langchain/langgraph` prebuilt) — overvej til implementer-loopen
+  (Trin 3) frem for at håndrulle endnu en loop som analyst. Lavere risiko, mindre kode.
+- **`deepagents`** (LangChain's "deep agent"-scaffold: planning-todo + subagents + virtuel
+  FS) — **mine patterns, men adoptér ikke som motor.** Vores backlog (Postgres),
+  Verifier-som-sandhed, governors og core-pure er bevidst stærkere/mere persistente end
+  deepagents' in-state todo + virtuelle filsystem (vi vil have *rigtige* filer + *rigtige*
+  checks). Lån fra det:
+  - **Sub-agent / kontekst-isolation** til parallelle workers (M2 Trin 6) — hver worker
+    sit eget kontekst-vindue, så de ikke forurener hinanden.
+  - **Filsystem-tool-interfacet** som inspiration til write-laget — men vi vil have
+    **disk + git-worktree**, ikke deepagents' virtuelle (in-state) FS.
+  - **Planning-mønstret** — men kun som inspiration; vores **persistente backlog er
+    allerede et niveau over** en todo-liste i kontekst.
+
+### 🤝 M3 — Kvalitet & tillid (Phase 5)
+
 - [ ] **Dybere verifikation.** Agent-genererede tests / e2e, så "grøn build" er en stærk
       sandhed — ikke kun lint/build.
 - [ ] **Konvergens-kvalitet.** Bedre dekomponering, undgå thrash, vide hvornår "godt nok" på
