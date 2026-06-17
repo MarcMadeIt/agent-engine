@@ -183,16 +183,6 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
         <span className="font-display text-base font-extrabold tracking-tight">Multi Agent Team</span>
       </div>
 
-      {/* New project — pinned at the top */}
-      <div className="px-2 pb-2">
-        <button
-          onClick={newProject}
-          className="btn btn-primary w-full gap-1.5 font-bold normal-case"
-        >
-          <LuFolderPlus className="h-4 w-4" /> Nyt projekt
-        </button>
-      </div>
-
       {/* ── Projects ── */}
       <div className="px-4 pb-1.5">
         <span className="text-[11px] uppercase tracking-[0.28em] text-dim">Projekter</span>
@@ -353,6 +343,15 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
       )}
 
       <div className="min-h-4 flex-1" />
+
+      <div className="border-t border-line px-4 py-3">
+        <button
+          onClick={newProject}
+          className="btn btn-primary w-full gap-1.5 font-bold normal-case"
+        >
+          <LuFolderPlus className="h-4 w-4" /> Nyt projekt
+        </button>
+      </div>
 
       <div className="flex items-center gap-2.5 border-t border-line px-5 py-3.5 text-sm text-dim">
         <Image src="/image.png" alt="Arzonic" width={24} height={24} className="rounded-sm opacity-80" />
