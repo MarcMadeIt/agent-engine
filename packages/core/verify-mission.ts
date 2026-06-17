@@ -381,4 +381,65 @@ function fakeIntegrator(opts: { conflict?: boolean } = {}) {
   ok(out.status === "done" && out.itemsDone === 1, "without an integrator, a verified item still closes (planning mode)");
 }
 
+// ── 15. parallelism (Trin 6): concurrent execution, SEQUENTIAL integration ──
+{
+  let active = 0;
+  let maxActive = 0;
+  const concurrentRunner: WorkRunner = {
+    async run(it) {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 10)); // hold the overlap window open
+      active--;
+      return {
+        runId: it.id, status: "accepted", draft: "", verdict: null, tokensUsed: 100,
+        worktree: `/wt/${it.id}`, branch: `mission/m/item/${it.id}`,
+      };
+    },
+  };
+  let merging = false;
+  let mergesStayedSerial = true;
+  const integrator: Integrator = {
+    async merge() {
+      if (merging) mergesStayedSerial = false; // a second merge entered while one was live
+      merging = true;
+      await new Promise((r) => setTimeout(r, 5));
+      merging = false;
+      return { merged: true, output: "ok" };
+    },
+    async rollback() {},
+    async cleanup() {},
+  };
+  const store = makeStore({ ...baseMission }, [item("a", 1), item("b", 1), item("c", 1)]);
+  const out = await runMission(
+    { backlog: store, verifier: passingVerifier, runner: concurrentRunner, integrator, governors: { concurrency: 3 } },
+    "m1",
+  );
+  ok(maxActive >= 2, `independent items execute concurrently (${maxActive} ran at once)`);
+  ok(mergesStayedSerial, "integration stayed sequential — no two merges overlapped on the shared branch");
+  ok(out.status === "done" && out.itemsDone === 3, "all concurrent items integrated + done");
+}
+
+// ── 16. dependencies hold even under concurrency: a dep never runs before its parent ──
+{
+  const order: string[] = [];
+  const trackingRunner: WorkRunner = {
+    async run(it) {
+      order.push(it.id);
+      return {
+        runId: it.id, status: "accepted", draft: "", verdict: null, tokensUsed: 100,
+        worktree: `/wt/${it.id}`, branch: `mission/m/item/${it.id}`,
+      };
+    },
+  };
+  const store = makeStore({ ...baseMission }, [item("a", 1), item("b", 1, ["a"]), item("c", 1)]);
+  const { integrator } = fakeIntegrator();
+  const out = await runMission(
+    { backlog: store, verifier: passingVerifier, runner: trackingRunner, integrator, governors: { concurrency: 3 } },
+    "m1",
+  );
+  ok(order.indexOf("a") < order.indexOf("b"), "a dependent (b) never runs in the same batch as its parent (a)");
+  ok(out.status === "done" && out.itemsDone === 3, "all items done with dependencies respected under concurrency");
+}
+
 console.log("\nrunMission controller loop verified ✓");

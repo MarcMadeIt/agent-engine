@@ -78,6 +78,16 @@ try {
   await wm.remove("never-existed");
   ok(true, "remove is a no-op for an unknown id");
 
+  // concurrency (Trin 6): provisioning many worktrees at once must not race on
+  // git's index.lock — the manager serializes git mutations internally.
+  const ids = ["p0", "p1", "p2", "p3", "p4"];
+  const made = await Promise.all(ids.map((id) => wm.create({ id, branch: `mission/m1/item/${id}` })));
+  ok(made.length === 5 && made.every((w) => existsSync(w.path)), "5 concurrent creates all succeed (no index.lock race)");
+  ok(new Set(made.map((w) => w.path)).size === 5, "each concurrent worktree got a distinct path");
+  ok((await wm.list()).length === 5, "all 5 are registered");
+  await Promise.all(ids.map((id) => wm.remove(id, { deleteBranch: true })));
+  ok((await wm.list()).length === 0, "5 concurrent removes all succeed");
+
   console.log("\nM2 worktree-manager verified ✓");
 } finally {
   await rm(repo, { recursive: true, force: true });

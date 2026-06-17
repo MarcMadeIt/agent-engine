@@ -45,6 +45,9 @@ const EnvSchema = z
     MISSION_MAX_ITERATIONS: z.coerce.number().int().min(1).optional(),
     MISSION_NOPROGRESS_LIMIT: z.coerce.number().int().min(1).default(3),
     MISSION_THRASH_LIMIT: z.coerce.number().int().min(1).default(3),
+    // Items run concurrently per mission (each in its own worktree). Default 1
+    // (serial). Integration/merge stays sequential regardless.
+    MISSION_CONCURRENCY: z.coerce.number().int().min(1).default(1),
     // Checks the mission Verifier runs per item — the truth source for "done".
     MISSION_CHECKS: z
       .string()

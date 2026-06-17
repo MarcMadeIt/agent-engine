@@ -29,8 +29,9 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 - [x] **M1 — Missions-motoren.** Autonom loop der planlægger, kører, verificerer,
       genplanlægger, parkerer risiko, stopper sikkert og kan overvåges. = design-brief §6,
       Trin 1–8. *(leveret — API + worker + dashboard)*
-- [ ] **M2 — Fra motor til byg.** Skrive-capable eksekvering i worktrees + parallelisme —
-      springet fra "laver en plan" til "laver kørende kode". *(Phase 5)*
+- [x] **M2 — Fra motor til byg.** Skrive-capable eksekvering i worktrees + parallelisme —
+      springet fra "laver en plan" til "laver kørende kode". *(leveret — write-tools, worktrees,
+      implementer-node, worktree-runner, integration+verify-after-merge, parallelisme)*
 - [ ] **M3 — Kvalitet & tillid.** Dybere verifikation/tests, konvergens-tuning, drift over
       mange timer (cost/retries), tillids-UX (diffs, digest, kurskorrektion). *(Phase 5)*
 - [ ] **M4 — Produktisering.** Løft core ind i Ranky/Bravy, multi-tenant, deploy af
@@ -47,6 +48,21 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 ---
 
 ## ✅ Senest leveret
+
+### 2026-06-18 — M2 Trin 6: Parallelisme (M2 i mål 🎉)
+- [x] `concurrency`-governor i controlleren ([packages/core/src/controller.ts](../packages/core/src/controller.ts)):
+      picker en **batch** på op til N actionable items, kører dem **parallelt** (`Promise.all`: eksekvering +
+      worktree-verifikation hver i sit worktree), men **finaliserer/integrerer sekventielt** — merge + re-verify
+      på den delte mission-branch må ikke race. Default 1 = nøjagtig den serielle loop (bagudkompat).
+- [x] Loop-kroppen refaktoreret til `pickBatch` / `runAndReplan` (parallel) / `finalize` (seriel); alle governors,
+      thrash-guard, resume og kill switch bevaret uændret.
+- [x] **Afhængigheder holder under concurrency:** en in_progress-markeret parent gør sin dependent
+      ikke-actionable → dependent kan ikke havne i samme batch. `MISSION_CONCURRENCY` i env + worker.
+- [x] Worktree-manageren serialiserer git-mutationer internt (index.lock-mutex) så samtidige `git worktree add`
+      ikke racer; det tunge arbejde forbliver parallelt.
+- [x] Bevist ([verify-mission.ts](../packages/core/verify-mission.ts): 3 items samtidigt, merges forblev serielle,
+      afhængigheder holdt + alle tidligere scenarier grønne; [verify-worktree.ts](../packages/shared/verify-worktree.ts):
+      5 samtidige creates/removes uden race). `turbo build` grøn (6/6).
 
 ### 2026-06-18 — M2 Trin 5: Integration + verificér-efter-merge (mission-branchen altid grøn)
 - [x] `Integrator`-seam i core ([packages/core/src/controller.ts](../packages/core/src/controller.ts)):
@@ -353,9 +369,10 @@ Build-order (shippet + bevist pr. trin, som M1):
       git-impl `createGitIntegrator`. Controller: grønt worktree → merge til mission-branch →
       **re-verify på mission-branch** → done **kun** hvis grøn efter merge; konflikt el. rød post-merge
       (rulles tilbage) → park `blocked_needs_human`. Mission-branchen forbliver altid grøn. (`controller.ts` + `integrator.ts`)
-- [ ] **6. Parallelisme** *(egen epic, sidst, konservativt)* — N actionable items samtidigt,
-      hver i egen worktree. Lead tildeler **ikke-overlappende fil-scopes**, ellers merge
-      **sekventielt** (rebase næste på forrige). Start med seriel-i-worktrees (1–5).
+- [x] **6. Parallelisme** — `concurrency`-governor (default 1 = seriel): N items kører **parallelt**
+      (hver i egen worktree, eksekvering + worktree-verifikation samtidigt), men **integration er seriel**
+      (merge + re-verify på den delte mission-branch må ikke race). Afhængigheder holder (en dependent
+      kan ikke i samme batch som sin parent). Worktree-manageren serialiserer git-mutationer (index.lock-mutex). (`controller.ts`)
 
 Sikkerheds-invarianter:
 

@@ -15,7 +15,13 @@ import {
 import { MISSION_DOT, relShort, STATUS_DOT } from "../lib/format";
 import { useToast } from "./Toast";
 
-type MenuTarget = { x: number; y: number; kind: "task" | "mission"; id: string; label: string };
+type MenuTarget = {
+  x: number;
+  y: number;
+  kind: "task" | "mission" | "project";
+  id: string;
+  label: string;
+};
 
 type Filter = "all" | "running" | "awaiting_human" | "done";
 
@@ -40,6 +46,7 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
   const [filter, setFilter] = useState<Filter>("all");
   const [menu, setMenu] = useState<MenuTarget | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [confirmProject, setConfirmProject] = useState<{ id: string; name: string } | null>(null);
   const toast = useToast();
 
   const activeId = pathname.startsWith("/runs/") ? pathname.split("/")[2] : null;
@@ -146,6 +153,29 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
     }
   };
 
+  const deleteProject = async (id: string) => {
+    setConfirmProject(null);
+    setDeleting(id);
+    // optimistic: drop the project + its tasks/missions (server cascades them)
+    const remaining = projects.filter((p) => p.id !== id);
+    setProjects(remaining);
+    setTasks((prev) => prev.filter((t) => t.projectId !== id));
+    setMissions((prev) => prev.filter((m) => m.projectId !== id));
+    try {
+      const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
+      toast("Projekt slettet");
+      if (activeProject === id) {
+        setActiveProject(remaining[0]?.id ?? "");
+        router.push("/");
+      }
+    } catch {
+      toast("Kunne ikke slette projektet", "error");
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   const switchProject = (id: string) => {
     setActiveProject(id);
     onNavigate?.();
@@ -157,6 +187,14 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
     onNavigate?.();
     router.push("/");
   };
+
+  // Escape closes the delete-project confirmation.
+  useEffect(() => {
+    if (!confirmProject) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setConfirmProject(null);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirmProject]);
 
   // close the context menu on any outside click / escape / scroll
   useEffect(() => {
@@ -214,9 +252,13 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
                 <li key={p.id}>
                   <button
                     onClick={() => switchProject(p.id)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({ x: e.clientX, y: e.clientY, kind: "project", id: p.id, label: p.name });
+                    }}
                     className={`block w-full rounded-field px-3 py-2 text-left transition ${
                       active ? "bg-elev" : "hover:bg-elev/60"
-                    }`}
+                    } ${deleting === p.id ? "pointer-events-none opacity-40" : ""}`}
                   >
                     <div className="flex items-center gap-2">
                       <span
@@ -385,11 +427,51 @@ export function LeftRail({ onNavigate }: { onNavigate?: () => void } = {}) {
         >
           <p className="truncate px-3 py-1.5 text-[11px] text-dim">{menu.label}</p>
           <button
-            onClick={() => void removeEntry(menu)}
+            onClick={() => {
+              if (menu.kind === "project") {
+                setConfirmProject({ id: menu.id, name: menu.label });
+                setMenu(null);
+              } else {
+                void removeEntry(menu);
+              }
+            }}
             className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-error transition hover:bg-error/10"
           >
-            <LuTrash2 className="h-4 w-4" /> {menu.kind === "task" ? "Slet opgave" : "Slet mission"}
+            <LuTrash2 className="h-4 w-4" />{" "}
+            {menu.kind === "task"
+              ? "Slet opgave"
+              : menu.kind === "mission"
+                ? "Slet mission"
+                : "Slet projekt"}
           </button>
+        </div>
+      )}
+
+      {/* delete-project confirmation (daisyUI modal; backdrop click closes) */}
+      {confirmProject && (
+        <div className="modal modal-open">
+          <div className="modal-box border border-line bg-panel">
+            <h3 className="text-base font-bold">Slet projekt?</h3>
+            <p className="py-3 text-sm leading-relaxed text-dim">
+              <span className="text-fg">{confirmProject.name}</span> slettes permanent — sammen med
+              alle dets opgaver, missioner og hukommelse. Dette kan ikke fortrydes.
+            </p>
+            <div className="modal-action">
+              <button
+                onClick={() => setConfirmProject(null)}
+                className="btn btn-ghost btn-sm normal-case"
+              >
+                Annuller
+              </button>
+              <button
+                onClick={() => void deleteProject(confirmProject.id)}
+                className="btn btn-error btn-sm gap-1.5 normal-case"
+              >
+                <LuTrash2 className="h-4 w-4" /> Slet projekt
+              </button>
+            </div>
+          </div>
+          <div className="modal-backdrop bg-black/60" onClick={() => setConfirmProject(null)} />
         </div>
       )}
     </aside>

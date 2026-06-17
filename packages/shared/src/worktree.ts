@@ -94,47 +94,66 @@ export function createWorktreeManager(
     return code === 0;
   }
 
+  // Serialize git-mutating ops: at concurrency > 1 several items provision/remove
+  // worktrees at once, and concurrent `git worktree add` would race on git's
+  // index.lock. The heavy work (implementer + verify) still runs in parallel;
+  // only these brief git mutations queue. (list() is read-only and stays unlocked
+  // so create/remove can call it while holding the lock — no re-entrant deadlock.)
+  let lock: Promise<unknown> = Promise.resolve();
+  const withLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = lock.then(fn, fn);
+    lock = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+
   return {
     list,
 
-    async prune() {
-      await git(repoPath, ["worktree", "prune"]);
+    prune() {
+      return withLock(() => git(repoPath, ["worktree", "prune"]).then(() => undefined));
     },
 
-    async create({ id, branch, baseRef = "HEAD" }: CreateWorktreeOptions): Promise<Worktree> {
+    create({ id, branch, baseRef = "HEAD" }: CreateWorktreeOptions): Promise<Worktree> {
       assertSafeId(id);
-      const path = pathFor(id);
+      return withLock(async () => {
+        const path = pathFor(id);
 
-      // Resume: a live worktree already registered for this id is reused as-is.
-      const existing = (await list()).find((w) => w.id === id);
-      if (existing) return existing;
+        // Resume: a live worktree already registered for this id is reused as-is.
+        const existing = (await list()).find((w) => w.id === id);
+        if (existing) return existing;
 
-      await mkdir(worktreesRoot, { recursive: true });
-      await ensureExcluded();
-      // Drop stale registry entries, then clear any leftover dir from a crash so
-      // `git worktree add` doesn't fail on an existing path.
-      await git(repoPath, ["worktree", "prune"]);
-      if (existsSync(path)) await rm(path, { recursive: true, force: true });
-
-      const args = (await branchExists(branch))
-        ? ["worktree", "add", path, branch]
-        : ["worktree", "add", "-b", branch, path, baseRef];
-      await git(repoPath, args);
-      return { id, path, branch };
-    },
-
-    async remove(id: string, opts: RemoveWorktreeOptions = {}): Promise<void> {
-      assertSafeId(id);
-      const existing = (await list()).find((w) => w.id === id);
-      const path = pathFor(id);
-      if (existing || existsSync(path)) {
-        await runGit(repoPath, ["worktree", "remove", "--force", path]);
+        await mkdir(worktreesRoot, { recursive: true });
+        await ensureExcluded();
+        // Drop stale registry entries, then clear any leftover dir from a crash so
+        // `git worktree add` doesn't fail on an existing path.
         await git(repoPath, ["worktree", "prune"]);
         if (existsSync(path)) await rm(path, { recursive: true, force: true });
-      }
-      if (opts.deleteBranch && existing) {
-        await runGit(repoPath, ["branch", "-D", existing.branch]);
-      }
+
+        const args = (await branchExists(branch))
+          ? ["worktree", "add", path, branch]
+          : ["worktree", "add", "-b", branch, path, baseRef];
+        await git(repoPath, args);
+        return { id, path, branch };
+      });
+    },
+
+    remove(id: string, opts: RemoveWorktreeOptions = {}): Promise<void> {
+      assertSafeId(id);
+      return withLock(async () => {
+        const existing = (await list()).find((w) => w.id === id);
+        const path = pathFor(id);
+        if (existing || existsSync(path)) {
+          await runGit(repoPath, ["worktree", "remove", "--force", path]);
+          await git(repoPath, ["worktree", "prune"]);
+          if (existsSync(path)) await rm(path, { recursive: true, force: true });
+        }
+        if (opts.deleteBranch && existing) {
+          await runGit(repoPath, ["branch", "-D", existing.branch]);
+        }
+      });
     },
   };
 }

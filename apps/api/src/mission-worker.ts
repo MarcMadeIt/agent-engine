@@ -64,12 +64,13 @@ async function main(): Promise<void> {
     tokenBudget: env.MISSION_TOKEN_BUDGET ?? null,
     noProgressLimit: env.MISSION_NOPROGRESS_LIMIT,
     thrashLimit: env.MISSION_THRASH_LIMIT,
+    concurrency: env.MISSION_CONCURRENCY,
   };
 
   console.log(
     `[mission-worker] v${APP_VERSION} up | provider: ${env.LLM_PROVIDER} | ` +
       `memory: ${memory ? "on" : "off"} | checks: ${env.MISSION_CHECKS.join(",")} | ` +
-      `poll: ${env.MISSION_WORKER_POLL_MS}ms`,
+      `concurrency: ${env.MISSION_CONCURRENCY} | poll: ${env.MISSION_WORKER_POLL_MS}ms`,
   );
 
   let stopping = false;

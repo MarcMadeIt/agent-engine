@@ -123,6 +123,14 @@ export interface MissionGovernors {
    * mission — the loop moves on to other work. Default 3.
    */
   thrashLimit?: number;
+  /**
+   * How many actionable items to run concurrently, each in its own worktree
+   * (Trin 6). Execution + per-worktree verification run in parallel; integration
+   * (merge + re-verify on the shared mission branch) stays SEQUENTIAL. Default 1
+   * — identical to the serial loop. Keep conservative; dependencies + sequential
+   * merge already bound how much can truly overlap.
+   */
+  concurrency?: number;
 }
 
 export interface MissionDeps {
@@ -181,10 +189,12 @@ export async function runMission(
   /** Per-item failure count for this run — drives the thrash guard. */
   const attempts = new Map<string, number>();
 
-  let mission = await backlog.getMission(missionId);
-  if (!mission) {
+  const loaded = await backlog.getMission(missionId);
+  if (!loaded) {
     return { status: "failed", reason: "not-found", iterations: 0, itemsDone: 0 };
   }
+  // Non-null for the closures below (a reassigned `let` would widen back to null).
+  let mission: Mission = loaded;
 
   // Resume hygiene: an item left mid-run by a crash goes back to the queue.
   for (const it of await backlog.listItems(missionId)) {
@@ -201,74 +211,58 @@ export async function runMission(
     return { status, reason, iterations, itemsDone };
   };
 
-  while (true) {
-    // Kill switch / external status change: anything but `running` halts here.
-    mission = (await backlog.getMission(missionId)) ?? mission;
-    if (mission.status !== "running") {
-      return { status: mission.status, reason: "stopped", iterations, itemsDone };
+  /**
+   * Pick up to `limit` actionable items, parking high-risk ones (§5.5) before any
+   * execution. Marks each picked item in_progress + notifies started. Marking
+   * in_progress keeps a dependent out of the SAME batch (its dep isn't done yet),
+   * so dependency order is preserved across concurrent items.
+   */
+  const pickBatch = async (limit: number): Promise<BacklogItem[]> => {
+    const batch: BacklogItem[] = [];
+    while (batch.length < limit) {
+      const next = await backlog.nextActionable(missionId);
+      if (!next) break;
+      if (classifyRisk(next, deps.highRiskPatterns) === "high") {
+        const parked =
+          (await backlog.updateItem(next.id, { status: "blocked_needs_human", risk: "high" })) ?? next;
+        await deps.notifier?.notify({ type: "item_parked", missionId, item: parked, reason: "high-risk" });
+        continue;
+      }
+      iterations++;
+      await backlog.updateItem(next.id, { status: "in_progress" });
+      await deps.notifier?.notify({ type: "item_started", missionId, item: next });
+      batch.push(next);
     }
+    return batch;
+  };
 
-    // ── governors ──
-    const gov = deps.governors ?? {};
-    if (gov.maxIterations != null && iterations >= gov.maxIterations) {
-      return stop("stopped", "max-iterations");
-    }
-    const budget = gov.tokenBudget ?? mission.budget;
-    if (budget != null && mission.spentTokens >= budget) {
-      return stop("stopped", "budget");
-    }
-    const deadline = gov.deadline ?? mission.deadline;
-    if (deadline && deps.clock && deps.clock.now() >= Date.parse(deadline)) {
-      return stop("stopped", "deadline");
-    }
-    if (noProgress >= noProgressLimit) {
-      return stop("stopped", "no-progress");
-    }
+  type ItemOutcome = {
+    item: BacklogItem;
+    result: WorkResult;
+    report: VerifierReport;
+    decision: ReplanDecision;
+  };
 
-    // ── pick the next actionable item ──
-    const item = await backlog.nextActionable(missionId);
-    if (!item) {
-      const items = await backlog.listItems(missionId);
-      const pending = items.some((i) => i.status === "todo" || i.status === "in_progress");
-      const parked = items.some((i) => i.status === "blocked_needs_human");
-      if (pending) return stop("blocked", "remaining items blocked on unmet dependencies");
-      if (parked) return stop("blocked", "all remaining items need a human");
-      return stop("done", "done");
-    }
-
-    // Human policy (§5.5): park high-risk work for an async decision and move
-    // on — the human never blocks the loop. Approval (approveParkedItem) clears
-    // the risk and re-queues it. Done before any execution so nothing
-    // irreversible runs unattended.
-    if (classifyRisk(item, deps.highRiskPatterns) === "high") {
-      const parked =
-        (await backlog.updateItem(item.id, { status: "blocked_needs_human", risk: "high" })) ??
-        item;
-      await deps.notifier?.notify({
-        type: "item_parked",
-        missionId,
-        item: parked,
-        reason: "high-risk",
-      });
-      continue;
-    }
-
-    iterations++;
-    await backlog.updateItem(item.id, { status: "in_progress" });
-    await deps.notifier?.notify({ type: "item_started", missionId, item });
-
-    // ── execute → verify → replan ──
+  /** Execute one item in its worktree, verify the authored code, replan. Parallel-safe. */
+  const runAndReplan = async (item: BacklogItem): Promise<ItemOutcome> => {
     const result = await runner.run(
       { id: item.id, title: item.title, detail: item.detail, context: missionContext(mission) },
       deps.signal,
     );
     await backlog.updateItem(item.id, { runId: result.runId });
-
     // Verify the AUTHORED code where it was written: the item's worktree when the
     // runner ran write-capably (Trin 4), else the mission repo (planning runner).
     const report = await verifier.run(checks, result.worktree);
     const decision = await replanner.replan({ mission, item, result, verification: report });
+    return { item, result, report, decision };
+  };
 
+  /**
+   * Close out one item: integrate (Trin 5), apply the thrash guard, persist the
+   * status + follow-ups + spend, and update progress counters. MUST run
+   * sequentially across a batch — integration mutates the shared mission branch.
+   */
+  const finalize = async ({ item, result, report, decision }: ItemOutcome): Promise<void> => {
     let effectiveStatus = decision.itemStatus;
     let verification = summarizeVerification(checks, report);
 
@@ -317,10 +311,7 @@ export async function runMission(
     }
 
     const finished =
-      (await backlog.updateItem(item.id, {
-        status: effectiveStatus,
-        verification,
-      })) ?? item;
+      (await backlog.updateItem(item.id, { status: effectiveStatus, verification })) ?? item;
     for (const f of decision.followUps ?? []) {
       await backlog.createItem({ ...f, missionId });
     }
@@ -338,11 +329,50 @@ export async function runMission(
     } else {
       noProgress++;
     }
-    await deps.notifier?.notify({
-      type: "item_finished",
-      missionId,
-      item: finished,
-      status: effectiveStatus,
-    });
+    await deps.notifier?.notify({ type: "item_finished", missionId, item: finished, status: effectiveStatus });
+  };
+
+  while (true) {
+    // Kill switch / external status change: anything but `running` halts here.
+    mission = (await backlog.getMission(missionId)) ?? mission;
+    if (mission.status !== "running") {
+      return { status: mission.status, reason: "stopped", iterations, itemsDone };
+    }
+
+    // ── governors ──
+    const gov = deps.governors ?? {};
+    if (gov.maxIterations != null && iterations >= gov.maxIterations) {
+      return stop("stopped", "max-iterations");
+    }
+    const budget = gov.tokenBudget ?? mission.budget;
+    if (budget != null && mission.spentTokens >= budget) {
+      return stop("stopped", "budget");
+    }
+    const deadline = gov.deadline ?? mission.deadline;
+    if (deadline && deps.clock && deps.clock.now() >= Date.parse(deadline)) {
+      return stop("stopped", "deadline");
+    }
+    if (noProgress >= noProgressLimit) {
+      return stop("stopped", "no-progress");
+    }
+
+    // ── pick a batch of actionable items (high-risk parked before execution) ──
+    const concurrency = Math.max(1, gov.concurrency ?? 1);
+    const batch = await pickBatch(concurrency);
+    if (batch.length === 0) {
+      const items = await backlog.listItems(missionId);
+      const pending = items.some((i) => i.status === "todo" || i.status === "in_progress");
+      const parked = items.some((i) => i.status === "blocked_needs_human");
+      if (pending) return stop("blocked", "remaining items blocked on unmet dependencies");
+      if (parked) return stop("blocked", "all remaining items need a human");
+      return stop("done", "done");
+    }
+
+    // Execute + verify + replan IN PARALLEL — each item in its own worktree, so
+    // they never share a working tree. Integration is then applied SEQUENTIALLY
+    // (next), because every merge + post-merge re-verify mutates the one shared
+    // mission branch and must not race.
+    const outcomes = await Promise.all(batch.map((it) => runAndReplan(it)));
+    for (const outcome of outcomes) await finalize(outcome);
   }
 }
