@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LuBrain, LuListTodo, LuRocket } from "react-icons/lu";
+import { LuBrain, LuListTodo, LuPencil, LuRocket } from "react-icons/lu";
 import type { MissionSummary, Project, ProjectTask, RepoInfo, Rubric } from "@arzonic/agent-client";
 import {
   ACTIVE_PROJECT_EVENT,
@@ -12,7 +12,7 @@ import {
   useActiveProject,
 } from "./lib/activeProject";
 import { relTime, repoLabel } from "./lib/format";
-import { CreateProjectView } from "./components/CreateProjectView";
+import { ProjectFormView } from "./components/ProjectFormView";
 import { DefinitionOfDone } from "./components/DefinitionOfDone";
 import { MissionComposer } from "./components/MissionComposer";
 import { ProjectMissions } from "./components/ProjectMissions";
@@ -34,6 +34,8 @@ export default function Composer() {
   const [mode, setMode] = useState<Mode>("task");
   const [loaded, setLoaded] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [savingProject, setSavingProject] = useState(false);
   const [savingRepo, setSavingRepo] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +120,7 @@ export default function Composer() {
 
   async function createProject(data: { name: string; brief: string; repoPath?: string }) {
     if (!data.name.trim()) return;
+    setSavingProject(true);
     setError(null);
     try {
       const res = await fetch("/api/projects", {
@@ -136,6 +139,32 @@ export default function Composer() {
       taRef.current?.focus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Kunne ikke oprette projektet");
+    } finally {
+      setSavingProject(false);
+    }
+  }
+
+  async function updateProject(data: { name: string; brief: string; repoPath: string }) {
+    if (!projectId || !data.name.trim()) return;
+    setSavingProject(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        // repoPath "" clears the bound repo; a path sets it.
+        body: JSON.stringify({ name: data.name, brief: data.brief, repoPath: data.repoPath || null }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const updated = (await res.json()) as Project;
+      setProjects((prev) =>
+        prev.map((p) => (p.id === updated.id ? { ...updated, stats: p.stats } : p)),
+      );
+      setEditOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Kunne ikke gemme projektet");
+    } finally {
+      setSavingProject(false);
     }
   }
 
@@ -188,16 +217,40 @@ export default function Composer() {
     );
   }
 
-  // First-ever project, or the "Nyt" flow → full-screen create view.
+  // Create (first-ever or "Nyt projekt") → full-screen form.
   if (projects.length === 0 || newOpen) {
     return (
-      <CreateProjectView
+      <ProjectFormView
+        mode="create"
         firstEver={projects.length === 0}
         repos={repos}
         error={error}
-        onCreate={createProject}
+        submitting={savingProject}
+        onSubmit={(d) => void createProject({ name: d.name, brief: d.brief, repoPath: d.repoPath || undefined })}
         onCancel={() => {
           setNewOpen(false);
+          setError(null);
+        }}
+      />
+    );
+  }
+
+  // Edit existing project → full-screen form (name + brief + repo).
+  if (editOpen && selected) {
+    return (
+      <ProjectFormView
+        mode="edit"
+        repos={repos}
+        initialName={selected.name}
+        initialBrief={selected.brief}
+        initialRepo={
+          typeof selected.settings?.repoPath === "string" ? (selected.settings.repoPath as string) : ""
+        }
+        error={error}
+        submitting={savingProject}
+        onSubmit={updateProject}
+        onCancel={() => {
+          setEditOpen(false);
           setError(null);
         }}
       />
@@ -213,14 +266,27 @@ export default function Composer() {
       <div className="w-full max-w-2xl pb-20 pt-[7vh]">
         {/* project header */}
         <div className="rise mb-6">
-          <div className="min-w-0">
-            <p className="mb-2 text-xs uppercase tracking-[0.35em] text-dim">Arbejder i projekt</p>
-            <h1 className="display truncate text-4xl font-extrabold leading-[1.08] tracking-tight">
-              {selected?.name}
-            </h1>
-            {selected?.brief?.trim() && (
-              <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-dim">{selected.brief}</p>
-            )}
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="mb-2 text-xs uppercase tracking-[0.35em] text-dim">Arbejder i projekt</p>
+              <h1 className="display truncate text-4xl font-extrabold leading-[1.08] tracking-tight">
+                {selected?.name}
+              </h1>
+              {selected?.brief?.trim() && (
+                <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-dim">{selected.brief}</p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setError(null);
+                setEditOpen(true);
+              }}
+              title="Rediger projekt"
+              className="btn btn-ghost btn-sm shrink-0 gap-1 text-dim hover:text-fg"
+            >
+              <LuPencil className="h-3.5 w-3.5" /> Rediger
+            </button>
           </div>
 
           {/* memory + team */}

@@ -48,6 +48,19 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 
 ## ✅ Senest leveret
 
+### 2026-06-18 — M2 Trin 3: Implementer-node (ReAct-loop der skriver kode)
+- [x] Dedikeret `implementer`-node i core ([packages/core/src/nodes/implementer.ts](../packages/core/src/nodes/implementer.ts))
+      bygget på prebuilt `createReactAgent` (mindre kode, lavere risiko end håndrullet loop) —
+      ægte agentisk ReAct-loop, `recursionLimit`-termineret (~24 tool-runder), fanger ikke-konvergens pænt.
+- [x] Tool-belt = læse-tools (som analyst) **+ write-tools** (`write_file`/`apply_edit`/`delete_file`/`run_command`)
+      der wrapper en injiceret `WritableRepoTools`. Noden tager `WritableRepoTools` → write-evne
+      kan **ikke** lække ind i builder/worker (tekst-only nodes får aldrig et write-capable objekt).
+- [x] `buildImplementerTools()` eksporteret separat (testbar glue); ny `implementer`-rolle i
+      AgentMessage-enum + `AgentRole` (client) + run-side-styling.
+- [x] Bevist ([packages/core/verify-implementer.ts](../packages/core/verify-implementer.ts), 12 checks)
+      med en **scripted fake tool-calling model** (ingen API-nøgle): ægte end-to-end hvor loopet
+      skriver+redigerer+verificerer en fil på disk, final summary → `draft`, tokens summeres, trace bygges. `turbo build` grøn (6/6).
+
 ### 2026-06-17 — M2 Trin 2: Worktree-manager (isoleret arbejde pr. item)
 - [x] Ny `WorktreeManager`-interface i core ([packages/core/src/worktree.ts](../packages/core/src/worktree.ts)):
       `create`/`remove`/`list`/`prune` — pure søm (ingen git/fs/`Date.now()`), injiceres som BacklogStore/Verifier.
@@ -295,12 +308,10 @@ Build-order (shippet + bevist pr. trin, som M1):
       `runCommand`, path-confined til `REPO_ALLOWED_ROOTS`. (`tools.ts` + `repoTools.ts`)
 - [x] **2. Worktree-manager** (injiceret søm i `shared`, som BacklogStore/Verifier) —
       worktree pr. item på en mission-branch, oprydning + `git worktree prune` ved crash.
-- [ ] **3. Implementer-node med write-tools** — wrap write-tools som LangChain `tool()`
-      + `bindTools` (samme mønster som [analyst.ts](../packages/core/src/nodes/analyst.ts)).
-      **Bliver en agentisk ReAct-loop** med egen terminering (max tool-iterationer +
-      token-budget) — ikke single-shot som worker/builder i dag. Gate write-tools til
-      mission/kode, så de **ikke lækker ind i builders single-mode tekst-opgaver**
-      (overvej en dedikeret implementer-node frem for at overloade builder).
+- [x] **3. Implementer-node med write-tools** — dedikeret `implementer`-node bygget på
+      prebuilt `createReactAgent` (ReAct-loop, `recursionLimit`-termineret). Tager
+      `WritableRepoTools` → write-tools kan **ikke** lække ind i builders tekst-opgaver
+      (read-only nodes får aldrig et objekt med write-metoder). ([implementer.ts](../packages/core/src/nodes/implementer.ts))
 - [ ] **4. WorkRunner i worktree** — `createGraphWorkRunner` peger repo-tools mod item'ets
       worktree → Verifier checker den forfattede kode dér. (`runner.ts`)
 - [ ] **5. Integration + verificér-efter-merge** — verify i worktree → merge mission-branch

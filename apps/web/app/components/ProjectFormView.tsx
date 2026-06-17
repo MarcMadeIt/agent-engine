@@ -6,36 +6,59 @@ import type { RepoInfo } from "@arzonic/agent-client";
 import { RepoPicker } from "./RepoPicker";
 
 /**
- * Full-screen project-creation view — used both for the first-ever project
- * (no projects yet) and the "Nyt" flow, so it replaces the task composer
- * instead of stacking on top of it.
+ * Full-screen project form — used for the first-ever project, the "Nyt projekt"
+ * flow, and editing an existing project. Replaces the composer rather than
+ * stacking on it. Both create and edit include the repo picker.
+ *
+ * `onSubmit` reports `repoPath` as a trimmed string ("" = no repo); the caller
+ * maps it (create omits an empty repo; edit clears it).
  */
-export function CreateProjectView({
-  firstEver,
+export function ProjectFormView({
+  mode,
+  firstEver = false,
   repos,
+  initialName = "",
+  initialBrief = "",
+  initialRepo = "",
   error,
-  onCreate,
+  submitting,
+  onSubmit,
   onCancel,
 }: {
-  firstEver: boolean;
+  mode: "create" | "edit";
+  firstEver?: boolean;
   repos: RepoInfo[];
+  initialName?: string;
+  initialBrief?: string;
+  initialRepo?: string;
   error?: string | null;
-  onCreate: (data: { name: string; brief: string; repoPath?: string }) => void;
+  submitting?: boolean;
+  onSubmit: (data: { name: string; brief: string; repoPath: string }) => void;
   onCancel: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [brief, setBrief] = useState("");
-  const [repo, setRepo] = useState("");
+  const [name, setName] = useState(initialName);
+  const [brief, setBrief] = useState(initialBrief);
+  const [repo, setRepo] = useState(initialRepo);
+  const isEdit = mode === "edit";
+
+  const submit = () => {
+    if (!name.trim() || submitting) return;
+    onSubmit({ name, brief, repoPath: repo.trim() });
+  };
 
   return (
     <div className="flex h-full items-center justify-center overflow-y-auto px-6 sm:px-8">
       <div className="w-full max-w-lg py-10">
         <div className="rise mb-6">
           <p className="mb-3 text-xs uppercase tracking-[0.35em] text-dim">
-            {firstEver ? "Kom i gang" : "Nyt projekt"}
+            {isEdit ? "Rediger projekt" : firstEver ? "Kom i gang" : "Nyt projekt"}
           </p>
           <h1 className="display text-4xl font-extrabold leading-[1.08] tracking-tight">
-            {firstEver ? (
+            {isEdit ? (
+              <>
+                Rediger <span className="text-builder">projekt</span>
+              </>
+            ) : firstEver ? (
               <>
                 Opret dit <span className="text-builder">første projekt</span>
               </>
@@ -46,8 +69,9 @@ export function CreateProjectView({
             )}
           </h1>
           <p className="mt-3 text-sm leading-relaxed text-dim">
-            Opgaver hører til et projekt. Teamet husker projektets mål, beslutninger og tidligere
-            arbejde - så hver opgave bygger videre i stedet for at starte fra nul.
+            {isEdit
+              ? "Justér navn, brief og repo. Teamet bruger brief'en som projektets stående kontekst."
+              : "Opgaver hører til et projekt. Teamet husker projektets mål, beslutninger og tidligere arbejde - så hver opgave bygger videre i stedet for at starte fra nul."}
           </p>
         </div>
 
@@ -59,6 +83,9 @@ export function CreateProjectView({
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
             placeholder="Projektnavn (fx Ranky forside)"
             className="input input-sm w-full border-line bg-elev"
           />
@@ -77,11 +104,11 @@ export function CreateProjectView({
           </div>
           <div className="flex items-center gap-2 pt-1">
             <button
-              onClick={() => onCreate({ name, brief, repoPath: repo.trim() || undefined })}
-              disabled={!name.trim()}
+              onClick={submit}
+              disabled={!name.trim() || submitting}
               className="btn btn-primary btn-sm flex-1 font-bold normal-case"
             >
-              Opret projekt
+              {isEdit ? "Gem ændringer" : "Opret projekt"}
             </button>
             {!firstEver && (
               <button onClick={onCancel} className="btn btn-ghost btn-sm text-dim normal-case">

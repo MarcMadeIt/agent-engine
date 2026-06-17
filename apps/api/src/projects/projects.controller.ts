@@ -23,8 +23,10 @@ const CreateProjectSchema = z.object({
 });
 type CreateProjectDto = z.infer<typeof CreateProjectSchema>;
 
-// `repoPath: null` clears the project's bound repo; a string sets it.
+// Edit name/brief and/or the bound repo. `repoPath: null` clears the repo.
 const UpdateProjectSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  brief: z.string().max(20_000).optional(),
   repoPath: z.string().min(1).nullable().optional(),
 });
 type UpdateProjectDto = z.infer<typeof UpdateProjectSchema>;
@@ -64,11 +66,21 @@ export class ProjectsController {
     @Param("id") id: string,
     @Body(new ZodValidationPipe(UpdateProjectSchema)) dto: UpdateProjectDto,
   ): Promise<Project> {
-    const patch: Record<string, unknown> = {};
-    if (dto.repoPath !== undefined) {
-      patch.repoPath = dto.repoPath ? this.runs.validateRepoPath(dto.repoPath) : null;
+    let updated: Project | null = null;
+
+    if (dto.name !== undefined || dto.brief !== undefined) {
+      updated = await this.projects.update(id, { name: dto.name, brief: dto.brief });
     }
-    const updated = await this.projects.updateSettings(id, patch);
+
+    if (dto.repoPath !== undefined) {
+      const repoPath = dto.repoPath ? this.runs.validateRepoPath(dto.repoPath) : null;
+      updated = await this.projects.updateSettings(id, { repoPath });
+    }
+
+    if (updated === null) {
+      // Nothing to change, or the project doesn't exist — distinguish.
+      updated = await this.projects.get(id);
+    }
     if (!updated) throw new NotFoundException(`No project ${id}`);
     return updated;
   }

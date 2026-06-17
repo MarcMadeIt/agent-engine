@@ -11,6 +11,7 @@ export const AgentMessageSchema = z.object({
     "architect",
     "lead",
     "worker",
+    "implementer",
   ]),
   role: z.enum(["assistant", "user", "system"]),
   content: z.string(),

@@ -33,7 +33,8 @@ export type AgentRole =
   | "analyst"
   | "architect"
   | "lead"
-  | "worker";
+  | "worker"
+  | "implementer";
 
 export interface ApiMessage {
   agent: AgentRole;

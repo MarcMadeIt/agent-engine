@@ -38,6 +38,7 @@ const AGENT: Record<
   analyst: { color: "var(--color-analyst)", name: "Analyst", side: "left", Icon: LuSearch },
   architect: { color: "var(--color-analyst)", name: "Architect", side: "left", Icon: LuCompass },
   worker: { color: "var(--color-builder)", name: "Worker", side: "left", Icon: LuWrench },
+  implementer: { color: "var(--color-builder)", name: "Implementer", side: "left", Icon: LuWrench },
   lead: { color: "var(--color-lead)", name: "Lead", side: "left", Icon: LuCrown },
   critic: { color: "var(--color-critic)", name: "Critic", side: "right", Icon: LuGavel },
   human: { color: "var(--color-human)", name: "You", side: "right", Icon: LuUser },

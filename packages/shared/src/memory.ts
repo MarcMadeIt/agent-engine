@@ -180,6 +180,31 @@ export class MemoryService {
     return rows[0] ? this.mapProject(rows[0]) : null;
   }
 
+  /** Update a project's editable columns (name / brief). Only provided fields change. */
+  async updateProject(
+    id: string,
+    patch: { name?: string; brief?: string },
+  ): Promise<Project | null> {
+    const sets: string[] = [];
+    const vals: unknown[] = [];
+    let i = 1;
+    if (patch.name !== undefined) {
+      sets.push(`name = $${i++}`);
+      vals.push(patch.name);
+    }
+    if (patch.brief !== undefined) {
+      sets.push(`brief = $${i++}`);
+      vals.push(patch.brief);
+    }
+    if (sets.length === 0) return this.getProject(id);
+    vals.push(id);
+    const { rows } = await this.pool.query(
+      `UPDATE projects SET ${sets.join(", ")} WHERE id = $${i} RETURNING *`,
+      vals,
+    );
+    return rows[0] ? this.mapProject(rows[0]) : null;
+  }
+
   /** Shallow-merge keys into a project's `settings` jsonb (e.g. `{ repoPath }`). */
   async updateProjectSettings(
     id: string,

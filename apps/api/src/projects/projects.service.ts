@@ -39,6 +39,10 @@ export class ProjectsService {
     return this.db().createProject(name, brief, settings);
   }
 
+  update(id: string, patch: { name?: string; brief?: string }): Promise<Project | null> {
+    return this.db().updateProject(id, patch);
+  }
+
   updateSettings(id: string, patch: Record<string, unknown>): Promise<Project | null> {
     return this.db().updateProjectSettings(id, patch);
   }
