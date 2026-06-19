@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { LuInfo, LuKeyRound, LuSave, LuSettings, LuSlidersHorizontal, LuUsers, LuX } from "react-icons/lu";
 import type { AppSettings, ModelProvider } from "@arzonic/agent-client";
 import {
@@ -32,6 +33,11 @@ const PROVIDER_LABEL: Record<ModelProvider, string> = {
  * provider/model each role uses), persisted server-side so it changes at runtime.
  */
 export function SettingsModal({ onClose }: { onClose: () => void }) {
+  // Portal to <body> so the overlay escapes the LeftRail's stacking/clipping
+  // context (a transformed/overflow ancestor would otherwise trap `fixed`).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   const [section, setSection] = useState<SectionKey>("team");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [sel, setSel] = useState<TeamSelection>({});
@@ -93,8 +99,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     ? Object.entries(settings.envRoleModels).map(([r, s]) => `${r}=${s.provider}`)
     : [];
 
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+  if (!mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       <div className="relative flex h-[75vh] w-[75vw] max-w-[1100px] overflow-hidden rounded-box border border-line bg-panel shadow-2xl shadow-black/40">
         {/* ── menubar ── */}
@@ -207,6 +215,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
