@@ -188,7 +188,7 @@ export interface ModelSpec {
   /** Explicit model id; omitted = the provider's default. */
   model?: string;
 }
-/** Per-role model choices: role name → spec. Roles: architect, worker, lead, critic, builder, implementer, analyst, router, replan, decompose. */
+/** Per-role model choices: role name → spec. Roles: architect, worker, lead, critic, builder, implementer, analyst, router, replan, decompose, tester. */
 export type RoleModelsConfig = Record<string, ModelSpec>;
 
 /** App-wide settings (GET /settings). */

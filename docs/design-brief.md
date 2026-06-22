@@ -106,7 +106,8 @@ resolves `models[role] ?? model`. The runtime builds the map from `LLM_ROLE_MODE
 which is the single place provider SDKs (`@langchain/anthropic|mistralai|google-genai`)
 are instantiated. Unassigned roles fall back to `LLM_PROVIDER`, so it's purely
 additive. Roles: `architect, worker, lead, critic, builder, implementer, analyst,
-router, replan, decompose`.
+router, replan, decompose, tester`. (`tester` = the M3 Trin 2 test-author; e.g. a
+cheap Gemini tester over a Claude implementer.)
 
 **Per-mission team config (persisted).** Beyond the global env default, each mission
 stores its OWN role→model map on its `missions` row (`role_models` jsonb, §5.2), set
@@ -188,7 +189,9 @@ LLM), **`WorkRunner`** (runs one item through a compiled graph → deliverable +
 - **Orchestrator/Lead** — owns the backlog: prioritises, sets work in motion, re-plans from results.
 - **Implementer** — writes real code in the item's worktree (write tools, ReAct loop).
 - **Critic** — challenges the implementer's *actual diff* and loops it back for revision (★, below).
-- **Tester/Verifier** — runs the real checks; its result, not the LLM, decides "done".
+- **Tester** — authors a test that *exercises* the built code before verification, so a
+  green build is real evidence, not just "it compiles" (M3 Trin 2 ✓, below).
+- **Verifier** — runs the real checks; its exit code, not the LLM, decides "done".
 
 > **As-built (M3 ★ — the team challenges each item):** a mission item now runs
 > through `createMissionTeamGraph` — `implementer → critic → [pass | revise]`,
@@ -201,6 +204,24 @@ LLM), **`WorkRunner`** (runs one item through a compiled graph → deliverable +
 > (§3.8/per-mission §3.8), e.g. a cheap Gemini critic over a Claude implementer.
 > The Verifier (real checks) still independently decides "done"; the critic only
 > adds a gate. Set `MISSION_REVIEW_ROUNDS=0` for the pre-★ lone-implementer path.
+
+> **As-built (M3 Trin 2 — green = strong truth):** after the implementer (and
+> critic) finish, an injected **`TestAuthor`** seam authors a test that genuinely
+> exercises the change, in the item's worktree, **before** the Verifier runs — so
+> the same check that gates "done" also runs the new test. The LLM impl
+> (`makeTestAuthor`) is a ReAct loop reusing the implementer's write-tools, rooted
+> in the worktree, `recursionLimit`-terminated; it may **only author tests, never
+> touch implementation code** — if the code is wrong its test fails, which keeps the
+> item open (the point). It **never reports pass/fail**: the Verifier's exit code
+> stays the sole truth. Uses its own configurable **`tester`** model (§3.8). Gated by
+> `MISSION_AUTHOR_TESTS` (default off ⇒ pre-Trin-2 behaviour); pair with a `test`
+> check in `MISSION_CHECKS`. Writes are **confined to test files** (`*.test.*`,
+> `__tests__/`, …) in code — not just by prompt — so the tester can't "fix" the
+> impl to pass its own test. *Trade-off:* it biases toward "prove it" — a test that
+> fails because the **test itself** is broken (not the code) also keeps the item
+> open until a revision/thrash-park resolves it. *Proven:*
+> [verify-tester.ts](../packages/core/verify-tester.ts) — an authored test is **red**
+> on a buggy impl and **green** once fixed, and an attempt to write impl source is rejected.
 
 ### 5.5 Human policy — park-risk, run the rest (never block)
 
@@ -218,6 +239,23 @@ Hard ceilings (`MISSION_TOKEN_BUDGET`, `MISSION_DEADLINE` wall-clock,
 verified item → stop+flag); **thrash guard** (an item failing the same check
 repeatedly → park the item, not the mission); **kill switch**
 (`POST /missions/:id/stop`, halts at next checkpoint); live budget meter in the UI.
+
+> **As-built (M3 Trin 3 — drift-robustness, "survive the night"):** two layers keep
+> a long run alive through transient blips without hiding real failures. (1) **LLM
+> retry** — every model is built (`buildModel`, shared) with an env-driven
+> `MISSION_LLM_MAX_RETRIES` and a custom `onFailedAttempt` (`isTransientLlmError`)
+> so the provider's AsyncCaller retries ONLY transient errors (429 / 5xx / timeout /
+> network) with exponential backoff + jitter, and re-throws 4xx / auth / quota / a
+> kill-switch abort immediately. (2) **Controller recovery** — an injected
+> `isTransientError` predicate (core stays SDK-free) lets `runMission` catch a run
+> that still throws: a transient/infra failure **re-queues** the item (a SEPARATE
+> counter from the thrash budget, bounded by `MISSION_REQUEUE_LIMIT`, counted as
+> no-progress so a persistent outage still stops the mission); a non-transient throw
+> **parks** the item for a human with the error recorded — surfaced, never swallowed,
+> and never crashing the concurrent batch. Emits an `item_retried` event (the
+> structured retry log). *Proven:* [verify-retry.ts](../packages/shared/verify-retry.ts)
+> (classifier + real AsyncCaller backoff) and [verify-drift.ts](../packages/core/verify-drift.ts)
+> (transient recovers; non-transient surfaces; persistent outage terminates).
 
 ### 5.7 Mission API + worker (`apps/api`)
 
@@ -320,4 +358,7 @@ MISSION_NOPROGRESS_LIMIT=3            # consecutive no-progress iterations befor
 MISSION_HIGH_RISK_PATTERNS=           # extra patterns forcing risk=high (deploy, drop, delete …)
 MISSION_CONCURRENCY=1                 # items run in parallel per mission (integration stays serial)
 MISSION_REVIEW_ROUNDS=1              # ★ critic↔implementer revision cycles per item (0 = lone implementer)
+MISSION_AUTHOR_TESTS=false          # Trin 2: author a test exercising each item before verify (green = strong truth)
+MISSION_LLM_MAX_RETRIES=6           # Trin 3: transient-error retries per model call (exp backoff + jitter)
+MISSION_REQUEUE_LIMIT=2             # Trin 3: re-queues of a transiently-failing item before parking it
 ```

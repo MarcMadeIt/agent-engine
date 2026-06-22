@@ -24,6 +24,7 @@ export const TEAM_ROLES: TeamRole[] = [
   { key: "architect", label: "Arkitekt", hint: "designer trinene", dot: "bg-lead" },
   { key: "implementer", label: "Udvikler", hint: "skriver koden", dot: "bg-builder" },
   { key: "critic", label: "Kritiker", hint: "udfordrer arbejdet", dot: "bg-critic" },
+  { key: "tester", label: "Tester", hint: "skriver testen", dot: "bg-success" },
   { key: "lead", label: "Lead", hint: "samler resultatet", dot: "bg-human" },
   { key: "replan", label: "Koordinator", hint: "beslutter næste skridt", dot: "bg-warning" },
 ];

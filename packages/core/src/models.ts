@@ -9,9 +9,9 @@ import { z } from "zod";
  * *instances*, never provider/key/transport config.
  *
  * Graph roles (architect/worker/lead/critic/builder/analyst/router) drive the
- * task & team graphs; mission roles (implementer/replan/decompose) drive the
- * autonomous-mission loop. A role without an explicit assignment falls back to
- * a graph's default `model`, so this is purely additive — nothing breaks when
+ * task & team graphs; mission roles (implementer/replan/decompose/tester) drive
+ * the autonomous-mission loop. A role without an explicit assignment falls back
+ * to a graph's default `model`, so this is purely additive — nothing breaks when
  * `models` is omitted.
  */
 export const MODEL_ROLES = [
@@ -25,6 +25,7 @@ export const MODEL_ROLES = [
   "router",
   "replan",
   "decompose",
+  "tester",
 ] as const;
 
 export type ModelRole = (typeof MODEL_ROLES)[number];

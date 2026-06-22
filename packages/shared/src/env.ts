@@ -78,10 +78,30 @@ const EnvSchema = z
     // Items run concurrently per mission (each in its own worktree). Default 1
     // (serial). Integration/merge stays sequential regardless.
     MISSION_CONCURRENCY: z.coerce.number().int().min(1).default(1),
+    // Drift-robustness (M3 Trin 3): how many times a model call retries a TRANSIENT
+    // error (rate-limit/5xx/timeout) with exponential backoff + jitter, via the
+    // provider's AsyncCaller. 0 = no retry. Survives a long night of API blips.
+    MISSION_LLM_MAX_RETRIES: z.coerce.number().int().min(0).default(6),
+    // How many times the controller re-queues an item whose run throws a TRANSIENT
+    // infra error before parking it as blocked_needs_human (so a persistent outage
+    // still terminates). Kept separate from the thrash (logic-failure) budget.
+    // Default 2 (< MISSION_NOPROGRESS_LIMIT) so a sustained outage parks the item
+    // with a recorded "gave up after N retries" note rather than tripping the
+    // coarser no-progress stop first; raise it above no-progress to prefer a
+    // resumable stop over an infra-park.
+    MISSION_REQUEUE_LIMIT: z.coerce.number().int().min(1).default(2),
     // Adversarial review cycles per item (M3 ★): the critic challenges the
     // implementer's diff, looping back for revision on a fail. 0 = no review
     // (lone implementer, pre-★ behaviour); 1 = one review + one revision.
     MISSION_REVIEW_ROUNDS: z.coerce.number().int().min(0).default(1),
+    // Author a test that exercises each item before verification (M3 Trin 2), so
+    // "green" means a real test passed, not just that it compiles. Off by default
+    // (= pre-Trin-2 behaviour). Pair with a "test" check in MISSION_CHECKS, and
+    // assign the `tester` role in LLM_ROLE_MODELS to pick its model.
+    MISSION_AUTHOR_TESTS: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((v) => v === "true"),
     // Checks the mission Verifier runs per item — the truth source for "done".
     MISSION_CHECKS: z
       .string()

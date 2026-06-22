@@ -139,12 +139,48 @@ export async function createDecomposedItems(
   return created;
 }
 
+// ── TestAuthor seam (M3 Trin 2: a green build is only strong truth if a test
+//    actually exercises the code) ──
+
+export interface TestAuthorInput {
+  mission: Mission;
+  /** The backlog item the implementer just built. */
+  item: BacklogItem;
+  /** The work result — `result.worktree` is the tree the test must be authored in. */
+  result: WorkResult;
+}
+
+export interface TestAuthorResult {
+  /** Whether a test file was actually written/edited (best-effort, for the journal). */
+  authored: boolean;
+  /** One-line note for the journal/digest. */
+  note?: string;
+  /** Tokens the test-authoring step spent, folded into the mission budget. */
+  tokensUsed?: number;
+}
+
+/**
+ * Authors a test that exercises the just-built code, in the item's worktree,
+ * BEFORE the Verifier runs — so "green" means a real test passed, not merely
+ * "it compiles" (M3 Trin 2). Injected like every other seam; the LLM impl is
+ * `makeTestAuthor`. It only WRITES a test file: it never reports pass/fail and
+ * never decides "done" — the Verifier's exit code stays the sole truth (a test
+ * that fails the buggy code keeps the item open, which is the point). Optional:
+ * omitted ⇒ exactly the pre-Trin-2 behaviour. Should be best-effort and not throw
+ * (the controller also guards the call, since it runs inside the concurrent batch
+ * where a rejection would strand sibling items).
+ */
+export interface TestAuthor {
+  authorTest(input: TestAuthorInput): Promise<TestAuthorResult>;
+}
+
 // ── Notifier seam (Trin 7 wires real transport) ──
 
 export type MissionEvent =
   | { type: "item_started"; missionId: string; item: BacklogItem }
   | { type: "item_finished"; missionId: string; item: BacklogItem; status: BacklogItemStatus }
   | { type: "item_parked"; missionId: string; item: BacklogItem; reason: string }
+  | { type: "item_retried"; missionId: string; item: BacklogItem; attempt: number; reason: string }
   | { type: "mission_stopped"; missionId: string; status: MissionStatus; reason: string };
 
 export interface Notifier {
@@ -211,6 +247,14 @@ export interface MissionGovernors {
    * merge already bound how much can truly overlap.
    */
   concurrency?: number;
+  /**
+   * Times one item whose run throws a TRANSIENT/infra error (per `isTransientError`)
+   * is re-queued before being parked as `blocked_needs_human` instead of re-queued
+   * again — so a persistent outage still terminates. SEPARATE from `thrashLimit`
+   * (which counts logic failures): an infra blip must not burn the logic budget,
+   * nor vice-versa. Default 5.
+   */
+  requeueLimit?: number;
 }
 
 export interface MissionDeps {
@@ -219,6 +263,16 @@ export interface MissionDeps {
   runner: WorkRunner;
   /** Grows the initial backlog from the goal when it's empty (M3 Trin 1). Optional. */
   decomposer?: Decomposer;
+  /** Authors a test exercising the built code before verification (M3 Trin 2). Optional. */
+  testAuthor?: TestAuthor;
+  /**
+   * Classifies a thrown error as a TRANSIENT/infrastructure failure (rate-limit /
+   * 5xx / timeout / network) vs. a real one (M3 Trin 3). Injected from shared so
+   * core imports no SDK/error types. A transient run failure is re-queued; anything
+   * else is surfaced as a failed item. Optional — omitted ⇒ every throw is treated
+   * as non-transient (no re-queue), i.e. the pre-Trin-3 classification.
+   */
+  isTransientError?: (err: unknown) => boolean;
   replanner?: Replanner;
   notifier?: Notifier;
   clock?: Clock;
@@ -250,6 +304,12 @@ function missionContext(m: Mission): string {
   return lines.join("\n\n");
 }
 
+/** Short, safe text for a thrown error — for journal notes (never the control path). */
+function errText(err: unknown, max = 2000): string {
+  const s = err instanceof Error ? err.message || err.name : String(err);
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
 /** Collapse a multi-check report into the single Verification stored on an item. */
 function summarizeVerification(checks: string[], report: VerifierReport) {
   const failed = report.results.filter((r) => !r.passed);
@@ -268,8 +328,12 @@ export async function runMission(
   const checks = deps.checks ?? ["typecheck", "test"];
   const noProgressLimit = deps.governors?.noProgressLimit ?? 3;
   const thrashLimit = deps.governors?.thrashLimit ?? 3;
-  /** Per-item failure count for this run — drives the thrash guard. */
+  const requeueLimit = deps.governors?.requeueLimit ?? 5;
+  const isTransient = deps.isTransientError ?? (() => false);
+  /** Per-item LOGIC-failure count for this run — drives the thrash guard. */
   const attempts = new Map<string, number>();
+  /** Per-item TRANSIENT/infra re-queue count — kept separate from `attempts` (M3 Trin 3). */
+  const requeues = new Map<string, number>();
 
   const loaded = await backlog.getMission(missionId);
   if (!loaded) {
@@ -332,25 +396,55 @@ export async function runMission(
     return batch;
   };
 
-  type ItemOutcome = {
-    item: BacklogItem;
-    result: WorkResult;
-    report: VerifierReport;
-    decision: ReplanDecision;
+  type ItemOutcome =
+    | { kind: "ran"; item: BacklogItem; result: WorkResult; report: VerifierReport; decision: ReplanDecision }
+    | { kind: "requeue"; item: BacklogItem; reason: string }
+    | { kind: "error"; item: BacklogItem; error: unknown };
+
+  /**
+   * Execute one item in its worktree, verify the authored code, replan.
+   * Parallel-safe AND throw-safe: any error is caught and turned into an outcome
+   * (M3 Trin 3) so it can never reject the batch's `Promise.all` and strand
+   * siblings. A TRANSIENT/infra error becomes a `requeue`; anything else becomes an
+   * `error` finalize routes to the failed/thrash path — surfaced, never swallowed.
+   */
+  const runAndReplan = async (item: BacklogItem): Promise<ItemOutcome> => {
+    try {
+      return await runItem(item);
+    } catch (err) {
+      if (isTransient(err)) return { kind: "requeue", item, reason: errText(err, 300) };
+      return { kind: "error", item, error: err };
+    }
   };
 
-  /** Execute one item in its worktree, verify the authored code, replan. Parallel-safe. */
-  const runAndReplan = async (item: BacklogItem): Promise<ItemOutcome> => {
+  const runItem = async (item: BacklogItem): Promise<ItemOutcome> => {
     const result = await runner.run(
       { id: item.id, title: item.title, detail: item.detail, context: missionContext(mission) },
       deps.signal,
     );
     await backlog.updateItem(item.id, { runId: result.runId });
+    // Author a missing test (M3 Trin 2) in the worktree BEFORE verifying, so the
+    // same Verifier run that gates "done" also exercises the new test — "green"
+    // then means a real test passed, not merely that it compiles. Only when the
+    // runner ran write-capably (a worktree exists); the test author never reports
+    // pass/fail (the Verifier exit code stays the truth). Its tokens fold into the
+    // per-item spend — result is a local per-item object, safe to mutate here even
+    // though finalize (which reads result.tokensUsed) runs sequentially.
+    if (deps.testAuthor && result.worktree) {
+      try {
+        const authored = await deps.testAuthor.authorTest({ mission, item, result });
+        if (authored.tokensUsed) result.tokensUsed += authored.tokensUsed;
+      } catch {
+        // Best-effort: the tester never decides "done", so a throw must not reject
+        // this batch's Promise.all and strand its sibling items. The Verifier still
+        // runs whatever tests already exist.
+      }
+    }
     // Verify the AUTHORED code where it was written: the item's worktree when the
     // runner ran write-capably (Trin 4), else the mission repo (planning runner).
     const report = await verifier.run(checks, result.worktree);
     const decision = await replanner.replan({ mission, item, result, verification: report });
-    return { item, result, report, decision };
+    return { kind: "ran", item, result, report, decision };
   };
 
   /**
@@ -358,7 +452,59 @@ export async function runMission(
    * status + follow-ups + spend, and update progress counters. MUST run
    * sequentially across a batch — integration mutates the shared mission branch.
    */
-  const finalize = async ({ item, result, report, decision }: ItemOutcome): Promise<void> => {
+  const finalize = async (outcome: ItemOutcome): Promise<void> => {
+    // M3 Trin 3 — transient/infra recovery: re-queue the item (back to todo)
+    // instead of failing it, bounded by requeueLimit so a persistent outage still
+    // terminates. Counts as no-progress (so the no-progress governor can stop a
+    // long outage) but NOT as a thrash attempt (an infra blip must not burn the
+    // logic-failure budget). The Verifier never saw this item — there is no verdict
+    // to feed replan; re-queue is orthogonal to pass/fail.
+    // Note: a thrown run carries no WorkResult, so any tokens the LLM burned before
+    // the throw are intentionally NOT folded into spentTokens here (both this and
+    // the error branch) — a small, bounded budget-accuracy gap, not a leak.
+    if (outcome.kind === "requeue") {
+      const { item } = outcome;
+      const n = (requeues.get(item.id) ?? 0) + 1;
+      requeues.set(item.id, n);
+      if (n > requeueLimit) {
+        const parked =
+          (await backlog.updateItem(item.id, {
+            status: "blocked_needs_human",
+            verification: {
+              passed: false,
+              check: "infrastructure",
+              output: `Gave up after ${n - 1} transient retries — needs a human. Last error: ${outcome.reason}`,
+            },
+          })) ?? item;
+        noProgress = 0; // parking resolves it out of the pool — that's progress
+        await deps.notifier?.notify({ type: "item_parked", missionId, item: parked, reason: "infrastructure" });
+        return;
+      }
+      const requeued = (await backlog.updateItem(item.id, { status: "todo" })) ?? item;
+      noProgress++; // re-queue is not progress — a persistent outage trips no-progress
+      await deps.notifier?.notify({ type: "item_retried", missionId, item: requeued, attempt: n, reason: outcome.reason });
+      return;
+    }
+
+    // A non-transient throw (or no transient predicate): the run crashed without
+    // producing a verdict — abnormal, and retrying a deterministic crash won't
+    // help. PARK it for a human with the error recorded, so it is surfaced loudly
+    // (the mission ends "blocked", not a misleading "done") and never swallowed or
+    // crashing the loop. This also contains a throw that would otherwise reject the
+    // batch's Promise.all and strand siblings.
+    if (outcome.kind === "error") {
+      const { item } = outcome;
+      const parked =
+        (await backlog.updateItem(item.id, {
+          status: "blocked_needs_human",
+          verification: { passed: false, check: "run-error", output: errText(outcome.error) },
+        })) ?? item;
+      noProgress = 0; // parking resolves it out of the pool — that's progress
+      await deps.notifier?.notify({ type: "item_parked", missionId, item: parked, reason: "run-error" });
+      return;
+    }
+
+    const { item, result, report, decision } = outcome;
     let effectiveStatus = decision.itemStatus;
     let verification = summarizeVerification(checks, report);
 

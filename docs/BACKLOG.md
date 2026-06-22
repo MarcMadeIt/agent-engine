@@ -49,6 +49,51 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 
 ## ✅ Senest leveret
 
+### 2026-06-20 — M3 Trin 3: Drift-robusthed (overlever natten)
+- [x] **LLM-retry (shared):** `isTransientLlmError` + `llmRetryOnFailedAttempt` ([retry.ts](../packages/shared/src/retry.ts))
+      klassificerer transiente fejl (429/5xx/408/timeout/netværk) vs. rigtige (4xx/auth/quota/abort). `buildModel`
+      ([llm.ts](../packages/shared/src/llm.ts)) bygger hver provider med env-drevet `MISSION_LLM_MAX_RETRIES` +
+      denne `onFailedAttempt`, så LangChains AsyncCaller retrier **kun** transiente fejl med eksponentiel
+      backoff + jitter (gratis fra AsyncCaller) og kaster resten videre med det samme. Ét sted (`buildModel`)
+      dækker default-modellen + alle rolle-modeller.
+- [x] **Controller-recovery (core):** nyt injiceret `isTransientError`-seam på `MissionDeps` + `requeueLimit`-governor
+      ([controller.ts](../packages/core/src/controller.ts)). `runAndReplan` fanger nu alle kast (kan ikke længere
+      crashe den parallelle `Promise.all`-batch): transient/infra → **re-queue** (status `todo`, egen `requeues`-tæller
+      adskilt fra thrash `attempts`, `noProgress++` så vedvarende udfald stopper via no-progress, parkeres efter
+      `requeueLimit`); ikke-transient → **parkér** for menneske med fejlen logget (`run-error`).
+- [x] **Invariant bevaret (robusthed ≠ skjule fejl):** kun transiente fejl retries/re-queues; en ægte logik-/crash-fejl
+      overflades (parkeret med fejltekst), aldrig svøbt væk. Kill-switch-abort retries aldrig. Core forbliver ren
+      (ingen SDK/fejltyper — predikatet injiceres).
+- [x] **Struktureret event-log:** additivt `item_retried`-event (attempt + reason) i `MissionEvent` + render i
+      [notifier.ts](../packages/shared/src/notifier.ts). Tokens foldes som hidtil. Wired i
+      [mission-worker.ts](../apps/api/src/mission-worker.ts) (`isTransientLlmError` + `requeueLimit` + banner).
+- [x] Bevist: [verify-retry.ts](../packages/shared/verify-retry.ts) (28 checks — klassifikation, handler-semantik,
+      rigtig AsyncCaller-backoff) + [verify-drift.ts](../packages/core/verify-drift.ts) (15 checks — transient
+      genoptager, ikke-transient overflades/parkeres, vedvarende udfald terminerer via requeueLimit OG no-progress,
+      bagudkompat). `turbo build` grøn (6/6); alle tidligere harnesses + API-smoke grønne.
+
+### 2026-06-20 — M3 Trin 2: Agent-genererede tests (grøn = stærk sandhed)
+- [x] Nyt `TestAuthor`-søm i core ([controller.ts](../packages/core/src/controller.ts)): efter
+      implementeren bygger et item forfatter den en test der **udøver** koden i worktree'et **før**
+      Verifier kører — så "grøn" betyder *en rigtig test bestod*, ikke bare "det kompilerer". Injiceret,
+      **valgfrit** (udeladt ⇒ præcis pre-Trin-2-adfærd), og det springet fra "verificér det der findes"
+      til "sørg for at der findes noget der udøver koden".
+- [x] LLM-impl `makeTestAuthor` ([testAuthor.ts](../packages/core/src/nodes/testAuthor.ts)): ReAct-loop
+      på `createReactAgent` der **genbruger implementerens write-tools** rodfæstet i worktree'et,
+      `recursionLimit`-termineret (kan aldrig kile loopet). **Må kun røre test-filer** — er impl'en forkert
+      skal testen fejle (det er pointen). Core forbliver ren: den får en **repo-factory** `(worktree) →
+      WritableRepoTools` ind (som work-runnerens `buildGraph`), aldrig fs/git.
+- [x] **Invariant bevaret:** TestAuthor **rapporterer aldrig pass/fail**; Verifier-exit-koden er stadig
+      eneste sandhed for "done" (en test der fejler den buggy kode holder item'et åbent → `applyReplanGuards`).
+- [x] Egen konfigurerbar **`tester`-model** (rolle tilføjet til `MODEL_ROLES` i [models.ts](../packages/core/src/models.ts)
+      → flyder automatisk gennem `pickModel`/`buildRoleModels`/zod-validering/per-mission-config). Tokens
+      foldes ind i mission-budgettet. Gated af `MISSION_AUTHOR_TESTS` (default off); wired i
+      [mission-worker.ts](../apps/api/src/mission-worker.ts) med samme worktree-rodfæstede, allowlistede write-tools som implementeren.
+- [x] Bevist: [verify-tester.ts](../packages/core/verify-tester.ts) (12 checks, scriptet fake-model + rigtigt
+      git-repo) — den forfattede test er **rød** på `a-b` og **grøn** på `a+b`; controlleren kalder sømmet
+      **før** verify i det rigtige worktree og folder tokens; springes over uden worktree; bagudkompat uden sømmet.
+      `turbo build` grøn (6/6); role-models/mission/decompose-harnesses stadig grønne.
+
 ### 2026-06-20 — ★ Team i missioner: kritikeren udfordrer hvert item (grønt-men-forkert fanges)
 - [x] `createMissionTeamGraph` ([graph.ts](../packages/core/src/graph.ts)): **implementer → kritiker → revider**,
       bounded af `MISSION_REVIEW_ROUNDS` (default 1; 0 = gammel solo-implementer). Loop-tilbage giver implementeren
@@ -512,17 +557,35 @@ Build-order (shippet + bevist pr. trin, som M1/M2). Foundation → tillid:
       bruger sin **egen konfigurerede model** (fx billig Gemini over Claude-implementer). Verifier (rigtige checks)
       afgør stadig "done"; review er en ekstra gate. *Bevist:* [verify-mission-team.ts](../packages/core/verify-mission-team.ts)
       (fail→revider→pass mod rigtigt git-repo + always-fail terminerer bounded). `turbo build` grøn (6/6).
-- [ ] **2. Agent-genererede tests (grøn = stærk sandhed).** Når et item mangler en check der
-      faktisk udøver koden, lader vi en agent **forfatte testen** (i worktree'et, via
-      write-tools) og kører den som en rigtig check — Verifier-pass forbliver sandheden
-      (exit-kode, ikke LLM). *Bevis:* for et item uden test forfattes en test der **fanger**
-      en buggy impl (rød) og **passerer** en korrekt (grøn). Holder invarianten: genererede
-      tests er rigtige checks, ikke selv-attestering.
-- [ ] **3. Drift-robusthed (overlever natten).** Retry m. eksponentiel backoff + jitter på
-      *transiente* LLM-fejl (rate-limit/5xx/timeout), og fejl-recovery i controlleren: et item
-      der fejler på *infrastruktur* (ikke logik) re-queues frem for at parkeres som "failed".
-      Strukturet cost/event-log pr. mission. *Bevis:* en injiceret flaky model fejler N gange
-      og lykkes så → item fuldføres alligevel; en ægte ikke-transient fejl skjules ikke.
+- [x] **2. Agent-genererede tests (grøn = stærk sandhed).** *(leveret 2026-06-20)* Nyt
+      `TestAuthor`-søm i core ([controller.ts](../packages/core/src/controller.ts)) + LLM-impl
+      `makeTestAuthor` ([testAuthor.ts](../packages/core/src/nodes/testAuthor.ts)): efter
+      implementeren (og kritikeren) forfatter den en test der **udøver** ændringen i
+      worktree'et — **før** Verifier kører — så samme check der afgør "done" også kører den
+      nye test. ReAct-loop der genbruger implementerens write-tools, `recursionLimit`-termineret,
+      og **må kun røre test-filer** (ikke impl: en forkert impl skal få testen til at fejle).
+      Den **rapporterer aldrig pass/fail** — Verifier-exit-koden er stadig eneste sandhed. Egen
+      konfigurerbar **`tester`-model** (rolle tilføjet til `MODEL_ROLES`). Gated af
+      `MISSION_AUTHOR_TESTS` (default off ⇒ uændret), wired i mission-worker. *Bevist:*
+      [verify-tester.ts](../packages/core/verify-tester.ts) (12 checks) — en forfattet test er
+      **rød** på en buggy impl og **grøn** når den rettes; controlleren kalder sømmet før verify
+      i det rigtige worktree + folder tokens; springes over uden worktree; bagudkompat uden sømmet.
+      `turbo build` grøn (6/6).
+- [x] **3. Drift-robusthed (overlever natten).** *(leveret 2026-06-20)* To lag holder en lang
+      kørsel i live gennem transiente blips uden at skjule rigtige fejl. **(1) LLM-retry** (shared):
+      `buildModel` bygger hver model med env-drevet `MISSION_LLM_MAX_RETRIES` + en `onFailedAttempt`
+      (`isTransientLlmError`, [retry.ts](../packages/shared/src/retry.ts)) så providerens AsyncCaller
+      retrier **kun** transiente fejl (429/5xx/timeout/netværk) med eksponentiel backoff + jitter, og
+      kaster 4xx/auth/quota/kill-switch-abort videre med det samme. **(2) Controller-recovery** (core):
+      et injiceret `isTransientError`-seam (core forbliver SDK-fri) lader `runMission` fange et kast —
+      transient/infra **re-queues** item'et (egen tæller adskilt fra thrash, bounded af
+      `MISSION_REQUEUE_LIMIT`, tæller som no-progress så en vedvarende udfald stadig stopper missionen);
+      en ikke-transient fejl **parkeres** for et menneske med fejlen logget — fanget, aldrig svøbt væk,
+      og aldrig crasher den parallelle batch. Nyt `item_retried`-event (struktureret retry-log).
+      *Bevist:* [verify-retry.ts](../packages/shared/verify-retry.ts) (klassifikator + rigtig
+      AsyncCaller-backoff, 28 checks) + [verify-drift.ts](../packages/core/verify-drift.ts)
+      (transient genoptager; ikke-transient overflades; vedvarende udfald terminerer, 15 checks).
+      `turbo build` grøn (6/6).
 - [🚧] **4. Per-rolle modeller + prompt-caching (cost/kvalitet).**
   - [x] **Per-rolle modeller (global)** *(leveret 2026-06-19)* — `MODEL_ROLES`/`pickModel`-søm i core +
         `buildRoleModels(env)` i shared (mistral/anthropic/google), env `LLM_ROLE_MODELS`. Wired i alle

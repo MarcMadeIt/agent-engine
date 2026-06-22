@@ -9,6 +9,7 @@ import {
   type RoleModelsConfig,
 } from "@arzonic/agent-core";
 import type { Env, LlmProvider, RoleModelSpec } from "./env.js";
+import { llmRetryOnFailedAttempt, routeCompletionThroughTransientRetry } from "./retry.js";
 
 /** Default model id per provider, used when a spec leaves `model` unset. */
 const DEFAULT_MODELS: Record<LlmProvider, string> = {
@@ -25,28 +26,29 @@ const DEFAULT_MODELS: Record<LlmProvider, string> = {
  */
 export function buildModel(env: Env, spec: RoleModelSpec): BaseChatModel {
   const model = spec.model ?? DEFAULT_MODELS[spec.provider];
+  // Drift-robustness (M3 Trin 3): every provider routes its calls through
+  // LangChain's AsyncCaller, which retries with exponential backoff + jitter up to
+  // `maxRetries`. We make the count env-driven (survive a long night) and narrow
+  // WHICH errors retry via `onFailedAttempt` — only transient ones (rate-limit /
+  // 5xx / timeout); a 4xx / auth / quota / abort surfaces immediately.
+  const retry = {
+    maxRetries: env.MISSION_LLM_MAX_RETRIES,
+    onFailedAttempt: llmRetryOnFailedAttempt,
+  };
   switch (spec.provider) {
     case "anthropic":
-      return new ChatAnthropic({
-        apiKey: env.ANTHROPIC_API_KEY,
-        model,
-        temperature: 0.2,
-        maxRetries: 2,
-      });
+      // ChatAnthropic routes through this.caller, so the constructor option applies.
+      return new ChatAnthropic({ apiKey: env.ANTHROPIC_API_KEY, model, temperature: 0.2, ...retry });
     case "mistral":
-      return new ChatMistralAI({
-        apiKey: env.MISTRAL_API_KEY,
-        model,
-        temperature: 0.2,
-        maxRetries: 2,
-      });
+      // ChatMistralAI ignores this.caller (builds a fresh one per request), so the
+      // constructor onFailedAttempt is dropped — disable its internal retry and
+      // route our transient-only policy onto its request method instead.
+      return routeCompletionThroughTransientRetry(
+        new ChatMistralAI({ apiKey: env.MISTRAL_API_KEY, model, temperature: 0.2, maxRetries: 0 }),
+        env.MISSION_LLM_MAX_RETRIES,
+      );
     case "google":
-      return new ChatGoogleGenerativeAI({
-        apiKey: env.GOOGLE_API_KEY,
-        model,
-        temperature: 0.2,
-        maxRetries: 2,
-      });
+      return new ChatGoogleGenerativeAI({ apiKey: env.GOOGLE_API_KEY, model, temperature: 0.2, ...retry });
   }
 }
 

@@ -94,6 +94,9 @@ export {
   type DecomposeInput,
   type DecomposeResult,
   type DecomposedItem,
+  type TestAuthor,
+  type TestAuthorInput,
+  type TestAuthorResult,
   type Notifier,
   type MissionEvent,
   type Clock,
@@ -111,6 +114,10 @@ export {
   type MakeDecomposerOptions,
   type DecomposeGuardOptions,
 } from "./nodes/decompose.js";
+export {
+  makeTestAuthor,
+  type MakeTestAuthorOptions,
+} from "./nodes/testAuthor.js";
 export {
   classifyRisk,
   approveParkedItem,

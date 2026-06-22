@@ -23,6 +23,8 @@ function describe(e: MissionEvent): string {
       return `${e.status === "done" ? "✓" : "✗"} item ${e.status}: ${e.item.title}`;
     case "item_parked":
       return `⏸ parked (${e.reason}, needs human): ${e.item.title}`;
+    case "item_retried":
+      return `↻ retry #${e.attempt} (transient: ${e.reason}): ${e.item.title}`;
     case "mission_stopped":
       return `■ mission ${e.status} — ${e.reason}`;
   }
