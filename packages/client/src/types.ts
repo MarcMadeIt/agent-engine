@@ -187,6 +187,8 @@ export interface ModelSpec {
   provider: ModelProvider;
   /** Explicit model id; omitted = the provider's default. */
   model?: string;
+  /** Sampling temperature, 0 (deterministic) … 2; omitted = runtime default. Newer Claude ignores it. */
+  temperature?: number;
 }
 /** Per-role model choices: role name → spec. Roles: architect, worker, lead, critic, builder, implementer, analyst, router, replan, decompose, tester. */
 export type RoleModelsConfig = Record<string, ModelSpec>;

@@ -39,6 +39,25 @@ class CachingChatAnthropic extends ChatAnthropic {
   }
 }
 
+/** Sampling temperature when a role spec doesn't set one (low = focused building). */
+const DEFAULT_TEMPERATURE = 0.2;
+
+/**
+ * Claude models that REJECT a non-default temperature (they're steered by
+ * prompting/effort, and `@langchain/anthropic` throws if you pass one) — mirrors
+ * its adaptive-only list. buildModel drops temperature for these so a per-role
+ * temperature (or our default) can't 400 the call; Sonnet/older Claude honour it.
+ */
+const ANTHROPIC_ADAPTIVE_ONLY = [
+  "claude-opus-4-7",
+  "claude-opus-4-8",
+  "claude-fable-5",
+  "claude-mythos-5",
+  "claude-mythos-preview",
+];
+const anthropicHonoursTemperature = (model: string) =>
+  !ANTHROPIC_ADAPTIVE_ONLY.some((prefix) => model.startsWith(prefix));
+
 /**
  * Build ONE chat model from an explicit `{ provider, model? }` spec, pulling the
  * matching API key out of the env. This is the single place provider SDKs are
@@ -47,6 +66,8 @@ class CachingChatAnthropic extends ChatAnthropic {
  */
 export function buildModel(env: Env, spec: RoleModelSpec): BaseChatModel {
   const model = spec.model ?? DEFAULT_MODELS[spec.provider];
+  // Per-role temperature (M3 Trin 4): the spec's value, else a low building default.
+  const temperature = spec.temperature ?? DEFAULT_TEMPERATURE;
   // Drift-robustness (M3 Trin 3): every provider routes its calls through
   // LangChain's AsyncCaller, which retries with exponential backoff + jitter up to
   // `maxRetries`. We make the count env-driven (survive a long night) and narrow
@@ -62,18 +83,22 @@ export function buildModel(env: Env, spec: RoleModelSpec): BaseChatModel {
       // CachingChatAnthropic adds a default prompt-cache breakpoint (LLM_PROMPT_CACHE);
       // both are plain ChatAnthropic, so bindTools/withStructuredOutput are intact.
       const Anthropic = env.LLM_PROMPT_CACHE ? CachingChatAnthropic : ChatAnthropic;
-      return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, model, temperature: 0.2, ...retry });
+      // Adaptive-only Claude (Opus 4.7/4.8, Fable) reject temperature ≠ 1 and 400
+      // at invocation; drop it for them so a per-role temperature (or our default)
+      // never crashes the call. Sonnet/older Claude keep the configured value.
+      const temp = anthropicHonoursTemperature(model) ? temperature : undefined;
+      return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, model, temperature: temp, ...retry });
     }
     case "mistral":
       // ChatMistralAI ignores this.caller (builds a fresh one per request), so the
       // constructor onFailedAttempt is dropped — disable its internal retry and
       // route our transient-only policy onto its request method instead.
       return routeCompletionThroughTransientRetry(
-        new ChatMistralAI({ apiKey: env.MISTRAL_API_KEY, model, temperature: 0.2, maxRetries: 0 }),
+        new ChatMistralAI({ apiKey: env.MISTRAL_API_KEY, model, temperature, maxRetries: 0 }),
         env.MISSION_LLM_MAX_RETRIES,
       );
     case "google":
-      return new ChatGoogleGenerativeAI({ apiKey: env.GOOGLE_API_KEY, model, temperature: 0.2, ...retry });
+      return new ChatGoogleGenerativeAI({ apiKey: env.GOOGLE_API_KEY, model, temperature, ...retry });
   }
 }
 

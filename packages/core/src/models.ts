@@ -42,10 +42,17 @@ export type RoleModels = Partial<Record<ModelRole, BaseChatModel>>;
 export const MODEL_PROVIDERS = ["mistral", "anthropic", "google"] as const;
 export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
 
-/** One role's model assignment as plain config data: `{ provider, model? }`. */
+/** One role's model assignment as plain config data: `{ provider, model?, temperature? }`. */
 export const ModelSpecSchema = z.object({
   provider: z.enum(MODEL_PROVIDERS),
   model: z.string().min(1).optional(),
+  /**
+   * Sampling temperature, 0 (deterministic — e.g. a critic) … 2. Omitted = the
+   * runtime default. Provider-clamped. Newer Claude models (Opus 4.7/4.8, Fable)
+   * reject any temperature ≠ 1 — they're steered by prompting/effort — so the
+   * runtime resolver drops it for them rather than letting the call fail.
+   */
+  temperature: z.number().min(0).max(2).optional(),
 });
 export type ModelSpec = z.infer<typeof ModelSpecSchema>;
 

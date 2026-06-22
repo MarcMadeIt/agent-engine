@@ -128,4 +128,33 @@ ok(resolved.critic instanceof ChatAnthropic, "precedence: mission wins over glob
 ok(resolved.architect instanceof ChatGoogleGenerativeAI, "precedence: global default applies where the mission is silent (architect → Gemini)");
 ok(resolved.replan instanceof ChatMistralAI, "precedence: env baseline survives where neither global nor mission set it (replan → Mistral)");
 
-console.log("\nPer-role + per-mission + settings precedence verified ✓");
+// 7. Per-role TEMPERATURE flows to the built model; an adaptive-only Claude model
+//    (Opus 4.7/4.8) DROPS it so it can't 400, while other models honour it.
+setEnv({
+  LLM_PROVIDER: "mistral",
+  MISTRAL_API_KEY: "dummy-mistral",
+  ANTHROPIC_API_KEY: "dummy-anthropic",
+  LLM_ROLE_MODELS: JSON.stringify({
+    critic: { provider: "mistral", temperature: 0 }, // deterministic critic
+    architect: { provider: "mistral" }, // no temperature → runtime default
+    implementer: { provider: "anthropic", model: "claude-sonnet-4-6", temperature: 0.5 }, // Claude that honours it
+    tester: { provider: "anthropic", model: "claude-opus-4-8", temperature: 0 }, // Claude that rejects it
+  }),
+});
+const env5 = loadEnv();
+const tempRoles = buildRoleModels(env5);
+const tempOf = (m: unknown) => (m as { temperature?: number }).temperature;
+ok(tempOf(tempRoles.critic) === 0, "per-role temperature flows to the model (critic = 0, deterministic)");
+ok(tempOf(tempRoles.architect) === 0.2, "a role with no temperature gets the runtime default (0.2)");
+ok(tempOf(tempRoles.implementer) === 0.5, "a temperature-honouring Claude (Sonnet 4.6) keeps the configured temperature");
+ok(tempOf(tempRoles.tester) === undefined, "an adaptive-only Claude (Opus 4.8) DROPS temperature (it would 400 otherwise)");
+// And the drop actually prevents the 400 — invocationParams validates sampling-param compat.
+let invocThrew = false;
+try {
+  (tempRoles.tester as unknown as { invocationParams: () => unknown }).invocationParams();
+} catch {
+  invocThrew = true;
+}
+ok(!invocThrew, "building Opus 4.8 with the default temperature no longer throws at invocation (latent bug fixed)");
+
+console.log("\nPer-role + per-mission + settings precedence + temperature verified ✓");

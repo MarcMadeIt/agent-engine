@@ -49,6 +49,21 @@ Det store perspektiv — fra nu til Nordstjernen. Detaljerne lever i tiers + epi
 
 ## ✅ Senest leveret
 
+### 2026-06-23 — M3 Trin 4: Per-rolle temperatur (fx en deterministisk critic)
+- [x] **`temperature?` på `ModelSpec`** ([models.ts](../packages/core/src/models.ts), zod 0–2): hver rolle kan nu
+      sætte sin egen sampling-temperatur (0 = deterministisk, fx en critic). Rent additivt — udeladt ⇒ runtime-default.
+- [x] **Gratis gennem hele stakken:** env `LLM_ROLE_MODELS`, per-mission `missions.role_models` og settings
+      `PUT /settings/role-models` validerer alle gennem `RoleModelsConfigSchema`, så temperatur flyder uden ny plumbing.
+- [x] **`buildModel` honorerer den pr. provider** ([llm.ts](../packages/shared/src/llm.ts)) — og **dropper den for
+      adaptive-only Claude** (Opus 4.7/4.8, Fable), der afviser `temperature ≠ 1` med 400. Det **fixer samtidig en latent
+      bug:** den hardkodede `0.2` ville have crashet enhver rolle der kørte Opus 4.8, ved hvert kald.
+- [x] **UI:** et kompakt temperatur-input pr. rolle i [TeamModelPicker](../apps/web/app/components/TeamModelPicker.tsx)
+      (delt mellem composer + settings); deaktiveret med en hint når den valgte Claude-model ignorerer temperatur.
+- [x] Bevist: [verify-role-models.ts](../packages/shared/verify-role-models.ts) udvidet — critic=0 flyder til modellen,
+      manglende temp ⇒ default 0.2, Sonnet 4.6 beholder en konfigureret temp, Opus 4.8 **dropper** den, og
+      `invocationParams()` kaster ikke længere (latent bug bevist væk). `turbo build` grøn (6/6); cache/retry/role-models-
+      harnesses stadig grønne.
+
 ### 2026-06-23 — M3 Trin 4: Prompt-caching for Claude (billigere natkørsler)
 - [x] **`CachingChatAnthropic`** ([llm.ts](../packages/shared/src/llm.ts)): tynd `ChatAnthropic`-subklasse der
       overrider `invocationParams` og defaulter en top-level **ephemeral** `cache_control`-breakpoint på hvert
@@ -618,8 +633,15 @@ Build-order (shippet + bevist pr. trin, som M1/M2). Foundation → tillid:
         implementer/tester-ReAct-loopet: tools + system + den voksende transcript læses fra cache (~0.1x) hver
         tool-runde. *Bevist:* [verify-prompt-cache.ts](../packages/shared/verify-prompt-cache.ts) (wiring, ingen nøgle)
         + [verify-prompt-cache-live.ts](../packages/shared/verify-prompt-cache-live.ts) (måler cache_read>0 på 2. kald).
-  - [ ] **Per-rolle temperatur** (fx critic=0) + **per-projekt default** + redigér en **kørende** missions
-        team. (Bemærk: når team-i-missioner ★ lander, bliver architect/worker/lead/critic-valgene aktive i missionen.)
+  - [x] **Per-rolle temperatur** (fx critic=0) *(leveret 2026-06-23)* — `temperature?` på `ModelSpec`
+        ([models.ts](../packages/core/src/models.ts)) flyder gratis gennem env/per-mission/settings (alle bruger
+        `RoleModelsConfigSchema`); [buildModel](../packages/shared/src/llm.ts) honorerer den pr. provider og
+        **dropper den for adaptive-only Claude** (Opus 4.7/4.8, Fable) der 400'er på temperatur — fixer samtidig
+        en latent bug (hardkodet `0.2` ville have crashet en Opus-4.8-rolle). UI-input pr. rolle i `TeamModelPicker`.
+        *Bevist:* [verify-role-models.ts](../packages/shared/verify-role-models.ts) udvidet (critic=0 flyder, default
+        0.2, Sonnet beholder, Opus 4.8 dropper + invocationParams kaster ikke).
+  - [ ] **Per-projekt default** team-config + redigér en **kørende** missions team. (Bemærk: når team-i-missioner
+        ★ lander, bliver architect/worker/lead/critic-valgene aktive i missionen.)
 - [ ] **5. Approvable diffs (se hvad motoren skrev).** Nyt `Differ`-søm: pr. item en
       struktureret diff (ændrede filer, ±linjer, patch) af item-branch vs. mission-branch.
       Eksponeret i mission-API'et + vist på dashboardet — især for parkerede items, så et
