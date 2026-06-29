@@ -6,6 +6,8 @@ import { ToastProvider } from "./components/Toast";
 export const metadata: Metadata = {
   title: "Agent Engine · Control Room",
   description: "Watch and steer the Arzonic multi-agent debate engine.",
+  // Declare the icon so browsers use /favicon.png instead of probing /favicon.ico (404).
+  icons: { icon: "/favicon.png" },
 };
 
 export default function RootLayout({
